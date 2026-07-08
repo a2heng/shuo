@@ -1,6 +1,14 @@
 $ErrorActionPreference = "Stop"
 $7z = "C:\Program Files\7-Zip\7z.exe"
 
+# 0. Pre-check: generate locale files
+Write-Host "Generating locale files..."
+python -m i18n.build_i18n_locales generate
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "FAIL: locale generation failed"; exit 1
+}
+Write-Host "PASS: locale files generated"
+
 # 1. Timestamp
 $date = Get-Date -Format 'yyyy-MM-dd-HHmm'
 Set-Content build_version.py "BUILD_DATE = `"$date`"" -Encoding UTF8 -NoNewline
