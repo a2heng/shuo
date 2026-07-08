@@ -1,0 +1,5 @@
+;!@Install@!UTF-8!
+Title="Shuo"
+BeginPrompt="安装 Shuo 语音识别工具?"
+RunProgram="Shuo\_internal\asr_gui.exe"
+;!@InstallEnd@!

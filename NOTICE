@@ -1,0 +1,12 @@
+Acknowledgements
+================
+
+This project uses Qwen3-ASR-1.7B ONNX pipeline by andrewleech.
+
+- Original model: Qwen3-ASR-1.7B by Qwen Team (https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
+- Official repo: https://github.com/QwenLM/Qwen3-ASR
+- Technical report: https://arxiv.org/abs/2601.21337
+- ONNX export: https://github.com/andrewleech/qwen3-asr-onnx
+- Pre-built model: https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx
+
+Model weights license: https://huggingface.co/Qwen/Qwen3-ASR-1.7B

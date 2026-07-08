@@ -1,0 +1,13 @@
+Qwen3-ASR-0.6B-ONNX-CPU
+Qwen3.5-2B-ONNX-OPT
+
+**/__pycache__/
+*.pyc
+*.wav
+Shuo.spec
+
+build
+build_version.py
+dist
+debug_audio
+locales

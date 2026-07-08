@@ -1,0 +1,25 @@
+# GUI
+PySide6>=6.11.0
+
+# Icons
+qtawesome>=1.4.2
+
+# Global hotkey
+pynput>=1.8.0
+
+# Audio recording
+PyAudio>=0.2.14
+
+# ONNX inference
+onnx>=1.22.0
+onnxruntime>=1.27.0
+numpy>=2.5.1
+
+# Tokenizer
+tokenizers>=0.22.2
+
+# Model download
+huggingface_hub>=1.22.0
+
+# Packaging
+pyinstaller>=6.21.0
