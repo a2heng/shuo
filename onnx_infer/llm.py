@@ -1,6 +1,7 @@
 import sys
 import os
 import json
+import re
 import time
 import logging
 import threading
@@ -17,100 +18,74 @@ EOS_ID_ALT = 248046
 
 PRESETS = {
     "standard": (
-        "你将获得一段语音识别文本，按以下规则处理后直接输出：\n"
+        "你是一个文本转写工具，将口语化语音识别结果直接转为书面规范文本。不添加解释，不补全内容。\n\n"
         "规则：\n"
-        "1. 输入可能已带有部分标点，也可能完全没有标点。仅根据语义补充缺少的必要标点（逗号、句号、问号、感叹号），已存在的标点保留不动；\n"
-        "2. 不补全缺失的内容或改写用词；\n"
-        "3. 标点宁少勿多，不确定时不加。\n"
-        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n"
+        "- 输入可能已带有部分标点，也可能完全没有标点。仅根据语义补充缺少的必要标点（逗号、句号、问号、感叹号），已有标点检查并改正；\n"
+        "- 不补全缺失的内容或改写用词；\n"
+        "- 标点宁少勿多，不确定时不加。\n"
+        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n\n"
         "示例：\n"
-        "输入：小李明天下午的评审会议改到两点半了你的演示文稿做好了吗王总说还要加几页数据\n"
-        "输出：小李，明天下午的评审会议改到两点半了，你的演示文稿做好了吗？王总说还要加几页数据。\n"
-        "输入：今天路过超市买了些水果和酸奶然后去快递站取了包裹回到家才发现牛奶忘买了\n"
-        "输出：今天路过超市买了些水果和酸奶，然后去快递站取了包裹，回到家才发现牛奶忘买了。\n"
-        "输入：这个bug的原因找到了。数据库连接池配置不对导致超时你这边改一下配置文件然后重新部署\n"
-        "输出：这个bug的原因找到了。数据库连接池配置不对导致超时，你这边改一下配置文件，然后重新部署。\n"
-        "输入：下周去北京的机票订了吗酒店我看了一下有三家备选你倾向哪个\n"
+        "输入：下周去北京的机票订了吗？酒店我看了一下有三家备选你倾向哪个。\n"
         "输出：下周去北京的机票订了吗？酒店我看了一下有三家备选，你倾向哪个？\n"
-        "输入：昨晚加班到九点回到家已经十点半了吃完饭又处理了几封邮件然后十二点才睡\n"
-        "输出：昨晚加班到九点，回到家已经十点半了，吃完饭又处理了几封邮件，然后十二点才睡。"
+        "输入：昨晚加班到九点回到家已经十点半了吃完饭又处理了几封邮件然后十二点才睡。\n"
+        "输出：昨晚加班到九点，回到家已经十点半了，吃完饭又处理了几封邮件，然后十二点才睡。\n\n"
+        "请根据以上规则处理输入文本，不要多或少内容，语句不完整、不通顺也不自由发挥。"
     ),
     "moderate": (
-        "你将获得一段语音识别文本，按以下规则处理后直接输出：\n"
+        "你是一个文本转写工具，将口语化语音识别结果直接转为书面规范文本。不添加解释，不补全内容。\n\n"
         "规则：\n"
-        "1. 输入可能已带有部分标点，也可能没有。根据语义补充缺少的标点，已有标点保留不动，不补全缺失的内容；\n"
-        "2. 删除口癖和犹豫词（如嗯、啊、呃、那个、这个、就是说、然后、对吧、反正、大概、好像、就是、的话、之类的、这样的、对不对等）；\n"
-        "3. 不替换任何实词，保持原意。\n"
-        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n"
+        "- 输入可能已带有部分标点，也可能没有。根据语义补充缺少的标点，已有标点检查并改正，不补全缺失的内容；\n"
+        "- 删除口癖和犹豫词（如嗯、啊、呃、那个、这个、就是说、然后、对吧、反正、大概、好像、就是、的话、之类的、这样的、对不对等）；\n"
+        "- 不替换任何实词，保持原意。\n"
+        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n\n"
         "示例：\n"
-        "输入：嗯那个我觉得就是说这个方案好像不太行然后可能得改一下我再想想有没有更好的办法\n"
-        "输出：我觉得这个方案不太行，可能得改一下，我再想想有没有更好的办法。\n"
-        "输入：呃那个我们的服务器大概可能下周二吧要维护你提前备份一下数据\n"
-        "输出：我们的服务器下周二要维护，你提前备份一下数据。\n"
-        "输入：然后呢反正就是大概七八个人吧明天过来。你安排一下会议室和午饭\n"
-        "输出：七八个人明天过来。你安排一下会议室和午饭。\n"
-        "输入：啊对了我忘了说。昨天的会议纪要我发你了你先看一下有什么问题明天再讨论\n"
-        "输出：对了，我忘了说。昨天的会议纪要我发你了，你先看一下，有什么问题明天再讨论。\n"
-        "输入：这个文档我大概看了一下，然后觉得内容方面还要补充。你那边方便加一下吗\n"
-        "输出：我大概看了一下，觉得内容还要补充。你那边方便加一下吗？"
+        "输入：嗯那个我觉得就是说这个方案好像不太行然后可能得改一下，呃我再想想有没有更好的办法呃那个我们的服务器大概可能下周二吧要维护你提前备份一下数据\n"
+        "输出：我觉得这个方案不太行，可能得改一下，我再想想有没有更好的办法。我们的服务器下周二要维护，你提前备份一下数据。\n"
+        "输入：啊对了我忘了说。昨天的会议纪要我发你了你先看一下有什么问题明天再讨论 这个文档我大概看了一下，然后觉得内容方面还要补充。你那边方便加一下吗\n"
+        "输出：对了，我忘了说。昨天的会议纪要我发你了，你先看一下，有什么问题明天再讨论。我大概看了一下，觉得内容还要补充。你那边方便加一下吗？\n\n"
+        "请根据以上规则处理输入文本，不要多或少内容，语句不完整、不通顺也不自由发挥。"
     ),
     "aggressive": (
-        "你将获得一段语音识别文本，按以下规则处理后直接输出：\n"
+        "你是一个文本转写工具，将口语化语音识别结果直接转为书面规范文本。不添加解释，不补全内容。\n\n"
         "规则：\n"
-        "1. 补充缺少的标点，已有的标点保留不动，不补全缺失的内容；\n"
-        "2. 删除口癖和犹豫词（如嗯、啊、呃、那个、这个、就是说、然后、对吧、反正、大概、好像、就是、的话等）；\n"
-        "3. 纠正明显因语音识别导致的同音/近音词错误，仅当确定是识别错误时才改，模棱两可时保留原文；\n"
-        "4. 口语数字转为阿拉伯数字：一百二十→120、三千→3000、十五→15、一半→50%、三分之一→1/3、两点五→2.5、五点三→5.3；\n"
-        "5. 特殊读法转换（电话/编号/序列场景）：幺→1、两→2、陆→6、拐→7、洞→0；\n"
-        "6. 金额规范：块/毛→元/角（三块五→3.5元、五毛→0.5元）；\n"
-        "7. 物理单位用符号：米/m、厘米/cm、毫米/mm、公里/km、斤/斤、克/g、公斤/kg、吨/t、毫升/ml、升/L、平方米/m²、立方米/m³、摄氏度/℃、瓦/W、千瓦/kW、伏/V、安/A、赫兹/Hz、千米每小时/km/h、米每秒/m/s、毫秒/ms、秒/s、分/min、小时/h；\n"
-        "8. 数学表达式转规范：x的平方→x²、根号→√、F X→f(x)、a等于b加c→a=b+c；\n"
-        "9. 连续数字合并（电话/编号等）：幺三九零零八六→1390086；\n"
-        "10. 日期时间标准化：二零二六年→2026年、下午三点半→15:30。\n"
-        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n"
+        "- 补充缺失标点。\n"
+        "- 删除口癖和犹豫词嗯、啊、那个、就是说、然后、反正、大概、好像、就是、的话等。\n"
+        "- 修正明显的同音或近音识别错误。\n"
+        "- 将中文数字（包括幺、两、拐、洞等读法）转为阿拉伯数字并合并，金额只转数字（如三块五→3.5元）。\n"
+        "- 将日期时间转为标准格式（如二零二六年→2026年，下午三点半→15:30）。\n"
+        "- 将常见物理单位替换为符号（如米→m，平方米→m²，摄氏度→℃，千瓦→kW等）。\n"
+        "- 将数学口头表达式转为书写形式（如x的平方→x²，根号→√，f x等于x平方加一→f(x)=x²+1）。\n"
+        "- 将邮箱的at和点替换为@和.，中文数字合并（如一二三四五六@qq点com→123456@qq.com）。\n\n"
+        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n\n"
         "示例：\n"
-        "输入：嗯那个我觉得这个函数F X等于x的平方加一，它的导数是二x帮我查一下幺三九零零八六拐五二一\n"
-        "输出：我觉得f(x)=x²+1，它的导数是2x。帮我查一下13900867521。\n"
-        "输入：温度二十五度三开两个小时空调功率两千万这个大概一百二十斤重花了三块五\n"
-        "输出：温度25.3℃，开2小时空调，功率2000W。这个大概120斤重，花了3.5元。\n"
-        "输入：服务器下周二下午三点维护物体初始速度两点五米每秒加速度是一米每二次方秒\n"
-        "输出：服务器下周二15:00维护。物体初始速度2.5m/s，加速度1m/s²。\n"
-        "输入：用C加加写个类继承自BASE类然后实现接口。这个类的构造函数接收两个参数\n"
-        "输出：用C++写个类继承自BASE类，实现接口。这个类的构造函数接收两个参数。\n"
-        "输入：房间面积大概是二十五平方米功率是一千五百瓦电压二百二十伏\n"
-        "输出：房间面积大概是25m²，功率是1500W，电压220V。"
+        "输入：嗯那个函数f x等于x平方加一，下周二下午三点维护，温度二十五度三。\n"
+        "输出：函数f(x)=x²+1，下周二15:00维护，温度25.3℃。\n"
+        "请根据以上规则处理输入文本，不要多或少内容，语句不完整、不通顺也不自由发挥。"
     ),
     "aggressive_no_punc": (
-        "你将获得一段语音识别文本，按以下规则处理后直接输出：\n"
+        "你是一个文本转写工具，将口语化语音识别结果直接转为书面规范文本。不添加解释，不补全内容。\n\n"
         "规则：\n"
-        "1. 删除口癖和犹豫词（如嗯、啊、呃、那个、这个、就是说、然后、对吧、反正、大概等）；\n"
-        "2. 纠正明显因语音识别导致的同音词错误，不确定时不改；\n"
-        "3. 口语数字转为阿拉伯数字：一百二十→120、三千→3000、十五→15、一半→50%、两点五→2.5；\n"
-        "4. 特殊读法转换：幺→1、两→2、陆→6、拐→7、洞→0；\n"
-        "5. 金额规范：块/毛→元/角（三块五→3.5元）；\n"
-        "6. 物理单位用符号：米/m、厘米/cm、公斤/kg、克/g、吨/t、毫升/ml、升/L、摄氏度/℃、瓦/W、千瓦/kW、千米每小时/km/h、秒/s、分/min、小时/h；\n"
-        "7. 数学表达式转规范：x的平方→x²、根号→√；\n"
-        "8. 连续数字合并（电话/编号）：幺三九零零八六→1390086；\n"
-        "9. 日期时间标准化：二零二六年→2026年、下午三点半→15:30；\n"
-        "10. 去掉所有标点符号（句号、逗号、问号、感叹号、冒号、分号、引号等），但保留数字中的小数点。\n"
-        "要求：只输出最终文本，不要加引号，不要任何解释或问候。\n"
+        "- 句之间标点改为空格，句尾标点去除，符号系统保留。\n"
+        "- 删除口癖和犹豫词（嗯、啊、那个、就是说、然后、反正、大概、好像、就是、的话等）。\n"
+        "- 修正明显的同音或近音识别错误。\n"
+        "- 将中文数字（包括幺、两、拐、洞等读法）转为阿拉伯数字并合并，金额只转数字（如三块五→3.5元）。\n"
+        "- 将日期时间转为标准格式（如二零二六年→2026年，下午三点半→15:30）。\n"
+        "- 将常见物理单位替换为符号（如米→m，平方米→m²，摄氏度→℃，千瓦→kW等）。\n"
+        "- 将数学口头表达式转为书写形式（如x的平方→x²，根号→√，f x等于x平方加一→f(x)=x²+1）。\n"
+        "- 将邮箱的at和点替换为@和.，中文数字合并（如一二三四五六@qq点com→123456@qq.com）。\n\n"
+        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n\n"
         "示例：\n"
-        "输入：嗯那个我的电话是幺三九零零八六拐五二一大概下午三点半到。你到了给我电话\n"
-        "输出：我的电话是13900867521大概15:30到你到了给我电话\n"
-        "输入：这个大概一百二十斤重花了三块五服务器的功率是两千万温度二十五度三\n"
-        "输出：这个大概120斤重花了3.5元服务器功率是2000W温度25.3度\n"
-        "输入：物体初始速度两点五米每秒。加速度一米每二次方秒帮我查一下这个电话幺三九零零八六拐五二一\n"
-        "输出：物体初始速度2.5m/s加速度1m/s²帮我查一下这个电话13900867521\n"
-        "输入：房间二十五平方米功率一千五百瓦电压二百二十伏\n"
-        "输出：房间25平方米功率1500W电压220V"
+        "输入：嗯那个函数f x等于x平方加一，下周二下午三点维护，温度二十五度三。\n"
+        "输出：函数f(x)=x²+1 下周二15:00维护 温度25.3℃\n\n"
+        "请根据以上规则处理输入文本，不要多或少内容，语句不完整、不通顺也不自由发挥。"
     ),
     "translate": (
-        "你将获得一段语音识别文本，按以下规则处理后直接输出：\n"
+        "你是一个文本转写工具，将口语化语音识别结果直接转为书面规范文本。不添加解释，不补全内容。\n\n"
         "规则：\n"
-        "1. 将文本翻译成英文，保持原意和语气；\n"
-        "2. 如果原文已经是英文，则原样输出；\n"
-        "3. 文本中的中文数字先转为阿拉伯数字再翻译（如三点→3:00、一百二十→120）。\n"
-        "要求：只输出翻译后的文本，不要加引号，不要任何解释或问候。\n"
+        "- 将文本翻译成英文，保持原意和语气；\n"
+        "- 如果原文已经是英文，则原样输出；\n"
+        "- 文本中的中文数字先转为阿拉伯数字再翻译（如三点→3:00、一百二十→120）。\n"
+        "要求：只输出处理后的文本，不要加引号，不要任何解释或问候。\n\n"
         "示例：\n"
         "输入：早上好你今天怎么样。下午三点有个会议大概一个小时你参加吗\n"
         "输出：Good morning, how are you today? I have a meeting at 3 PM, about one hour. Will you join?\n"
@@ -119,7 +94,8 @@ PRESETS = {
         "输入：帮我订一张明天上午十点到上海的火车票。我的电话是幺三九零零八六拐五二一\n"
         "输出：Please book a train ticket to Shanghai for tomorrow at 10 AM. My phone number is 13900867521.\n"
         "输入：房间温度二十五度空调功率两千瓦开两个小时\n"
-        "输出：Room temperature is 25 degrees, air conditioner power is 2000W, run for 2 hours. "
+        "输出：Room temperature is 25 degrees, air conditioner power is 2000W, run for 2 hours. \n\n"
+        "请根据以上规则处理输入文本，不要多或少内容，语句不完整、不通顺也不自由发挥。"
     ),
 }
 
@@ -155,7 +131,7 @@ class Qwen3_5Onnx:
             providers=["CPUExecutionProvider"])
         self.tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
         self.decoder_out_names = [o.name for o in self.decoder.get_outputs()]
-        self._cached_sp = None
+        self._load_chat_template(model_dir)
 
     def _empty_past(self, batch=1):
         import numpy as np
@@ -179,29 +155,57 @@ class Qwen3_5Onnx:
                 past[name.replace("present.", "past_key_values.", 1)] = arr
         return past
 
-    def _cache_prefix(self, system_prompt: str):
-        """Cache token ids and embeddings for the fixed prompt prefix/suffix."""
-        import numpy as np
-        prefix = f"<|im_start|>system\n{system_prompt}<|im_end|>\n<|im_start|>user\n"
-        suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        self._pre_ids = self.tokenizer.encode(prefix).ids
-        self._suf_ids = self.tokenizer.encode(suffix).ids
-        self._pre_emb = self.embed.run(None, {"input_ids": np.array([self._pre_ids], dtype=np.int64)})[0]
-        self._suf_emb = self.embed.run(None, {"input_ids": np.array([self._suf_ids], dtype=np.int64)})[0]
-        self._cached_sp = system_prompt
+    def _load_chat_template(self, model_dir):
+        import jinja2
+        template_path = model_dir / "chat_template.jinja"
+        if template_path.exists():
+            with open(template_path, "r", encoding="utf-8") as f:
+                template_str = f.read()
+            env = jinja2.Environment(
+                loader=jinja2.BaseLoader(),
+                trim_blocks=True,
+                lstrip_blocks=True,
+            )
+            self._chat_template = env.from_string(template_str)
+        else:
+            self._chat_template = None
 
-    def generate(self, system_prompt: str, user_text: str, max_new: int = 512, temperature: float = 0.3):
-        import numpy as np
-        if self._cached_sp != system_prompt:
-            self._cache_prefix(system_prompt)
+    def apply_chat_template(self, system_prompt, user_prompt, enable_thinking=False):
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+        if self._chat_template:
+            return self._chat_template.render(
+                messages=messages,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+                tools=None,
+            )
+        # Fallback: manual chat format
+        BOS = "\u003cim_start\u003e"
+        EOS = "\u003cim_end\u003e"
+        text = ""
+        if system_prompt:
+            text = f"{BOS}system\n{system_prompt}{EOS}\n"
+        text += f"{BOS}user\n{user_prompt}{EOS}\n{BOS}assistant\n"
+        if not enable_thinking:
+            text += "<think>\n\n</think>\n\n"
+        return text
 
-        user_ids = self.tokenizer.encode(user_text).ids
-        tokens = self._pre_ids + user_ids + self._suf_ids
+    def generate(self, text: str, max_new: int = 512,
+                 temperature: float = 1.0, top_k: int = 20,
+                 top_p: float = 1.0, min_p: float = 0.0,
+                 presence_penalty: float = 2.0,
+                 repetition_penalty: float = 1.0):
+        import numpy as np
+
+        tokens = self.tokenizer.encode(text).ids
         seq_len = len(tokens)
+        if seq_len == 0:
+            return ""
 
-        user_emb = self.embed.run(None, {"input_ids": np.array([user_ids], dtype=np.int64)})[0]
-        emb = np.concatenate([self._pre_emb, user_emb, self._suf_emb], axis=1)
-
+        emb = self.embed.run(None, {"input_ids": np.array([tokens], dtype=np.int64)})[0]
         mask = np.ones((1, seq_len), dtype=np.int64)
         pos = np.arange(seq_len, dtype=np.int64)
         pos_ids = np.stack([pos, pos, pos], axis=0)[:, np.newaxis, :]
@@ -213,7 +217,8 @@ class Qwen3_5Onnx:
         logits = outputs[0]
         state = self._present_to_past(outputs)
 
-        next_id = int(np.argmax(logits[0, -1]))
+        next_id = self._sample_token(logits[0, -1], temperature, top_k, top_p, min_p,
+                                      presence_penalty, repetition_penalty, [])
         ids = [next_id]
         cur_pos = seq_len
 
@@ -231,12 +236,83 @@ class Qwen3_5Onnx:
             logits = outputs[0]
             state = self._present_to_past(outputs)
 
-            next_id = int(np.argmax(logits[0, -1]))
+            next_id = self._sample_token(logits[0, -1], temperature, top_k, top_p, min_p,
+                                          presence_penalty, repetition_penalty, ids)
             ids.append(next_id)
             cur_pos += 1
 
-        out = self.tokenizer.decode(ids, skip_special_tokens=True)
-        return out
+        # Filter out think block by token IDs (248068=<think>, 248069=</think>)
+        THINK_START = 248068
+        THINK_END = 248069
+        # Find content after last 
+        out_ids = ids
+        last_end = -1
+        for i, tid in enumerate(ids):
+            if tid == THINK_END:
+                last_end = i
+        if last_end >= 0:
+            out_ids = ids[last_end + 1:]
+        # Also strip leading think token if present
+        if out_ids and out_ids[0] == THINK_START:
+            out_ids = out_ids[1:]
+        return self.tokenizer.decode(out_ids, skip_special_tokens=True)
+
+    def _sample_token(self, logits, temperature, top_k, top_p, min_p,
+                      presence_penalty, repetition_penalty, generated_ids):
+        import numpy as np
+
+        # Apply repetition penalty
+        if repetition_penalty != 1.0 and generated_ids:
+            prev_logits = logits.copy()
+            for tid in set(generated_ids):
+                if prev_logits[tid] > 0:
+                    prev_logits[tid] /= repetition_penalty
+                else:
+                    prev_logits[tid] *= repetition_penalty
+            logits = prev_logits
+
+        # Apply presence penalty
+        if presence_penalty != 0.0 and generated_ids:
+            for tid in set(generated_ids):
+                logits[tid] -= presence_penalty
+
+        if temperature <= 0.0:
+            return int(np.argmax(logits))
+
+        # Temperature scaling
+        logits = logits / temperature
+
+        # Top-k filtering
+        if top_k > 0:
+            indices_to_remove = logits < np.sort(logits)[-top_k]
+            logits[indices_to_remove] = -np.inf
+
+        # Top-p filtering
+        if top_p < 1.0:
+            sorted_indices = np.argsort(logits)[::-1]
+            sorted_logits = logits[sorted_indices]
+            cumulative_probs = np.cumsum(np.exp(sorted_logits) / np.sum(np.exp(sorted_logits)))
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[1:] = sorted_indices_to_remove[:-1].copy()
+            sorted_indices_to_remove[0] = False
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            logits[indices_to_remove] = -np.inf
+
+        # Min-p filtering
+        if min_p > 0.0:
+            max_logit = np.max(logits)
+            min_logit_threshold = max_logit + np.log(min_p)
+            logits[logits < min_logit_threshold] = -np.inf
+
+        # Convert to probabilities and sample
+        exp_logits = np.exp(logits - np.max(logits))
+        probs = exp_logits / np.sum(exp_logits)
+
+        # Check for valid probabilities
+        if np.any(np.isnan(probs)) or np.sum(probs) == 0:
+            return int(np.argmax(logits))
+
+        return int(np.random.choice(len(probs), p=probs))
 
 
 def is_llm_available():
@@ -296,7 +372,7 @@ class ContextManager:
 context = ContextManager()
 
 
-def call_llm(prompt, system_prompt="", max_tokens=512, temperature=0.3, mtp=False,
+def call_llm(prompt, system_prompt="", max_tokens=512, temperature=1.0, mtp=False,
              timeout=30, context_pairs=None):
     global _model
     if _model is None:
@@ -307,17 +383,17 @@ def call_llm(prompt, system_prompt="", max_tokens=512, temperature=0.3, mtp=Fals
 
     with _inference_lock:
         try:
-            sp = system_prompt or "You are a text post-processing assistant. Output only the processed text without any explanation."
-            result = _model.generate(sp, prompt, max_new=max_tokens, temperature=temperature)
+            sp = system_prompt or PRESETS["standard"]
+            full_text = _model.apply_chat_template(sp, prompt, enable_thinking=False)
+            result = _model.generate(full_text, max_new=max_tokens,
+                                     temperature=temperature, top_k=20,
+                                     top_p=1.0, min_p=0.0,
+                                     presence_penalty=2.0,
+                                     repetition_penalty=1.0)
 
             if not result:
                 logger.info("LLM 响应为空")
                 return None
-
-            if result and "我是" in result:
-                lines = result.split('\n')
-                clean_lines = [l for l in lines if "我是" not in l]
-                result = "\n".join(clean_lines).strip()
 
             if result and context_pairs is None:
                 context.add(prompt, result)
