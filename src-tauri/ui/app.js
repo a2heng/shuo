@@ -36,7 +36,8 @@ const EXTRA = {
     "settings.style": "Output style",
     "settings.style_preset": "Style prompt",
     "settings.style_custom": "Custom prompt",
-    "settings.style_hint": "The fine-tuned model follows the style prompt while transcribing (polish / translate / brief / detail). Get it with the in-app download under Models & engine; on a base model the prompt only biases recognition — pick Verbatim for zero bias.",
+    "settings.style_hint": "The fine-tuned model follows the style prompt while transcribing (polish / translate / brief / detail). Only the preset phrasings (and prompts covered by the fine-tune) take effect — free-form custom wording is usually ignored. Download the model under Models & engine; on a base model the prompt only biases recognition — pick Verbatim for zero bias.",
+    "toast.style_custom_on": "Switched to custom prompt (editing the preset text)",
     "settings.style_state_tuned": "Fine-tuned model detected — the style prompt is executed as an instruction.",
     "settings.style_state_base": "Base model (no shuo-model.json) — the prompt only biases recognition. Download the fine-tuned model under Models & engine.",
     "settings.engine": "Models & engine",
@@ -58,6 +59,8 @@ const EXTRA = {
     "toast.need_name": "Enter a prompt name first",
     "toast.hotkey_invalid": "Unsupported hotkey",
     "status.ready": "ready",
+    "status.asr_name": "Speech recognition",
+    "status.denoise_name": "Denoise",
     "status.loading": "loading",
     "status.off": "off",
     "status.error": "error",
@@ -87,7 +90,8 @@ const EXTRA = {
     "settings.style": "输出风格",
     "settings.style_preset": "风格提示词",
     "settings.style_custom": "自定义提示词",
-    "settings.style_hint": "微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。",
+    "settings.style_hint": "微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。**只有预设那几种写法（以及微调训练覆盖过的提示词）才真正生效**，自己随手编的措辞通常会被忽略。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。",
+    "toast.style_custom_on": "已切换到自定义提示词（改动预设文本会自动切换）",
     "settings.style_state_tuned": "已检测到微调模型包——提示词会被当作风格指令执行。",
     "settings.style_state_base": "当前为基座模型包（无 shuo-model.json）——提示词仅作识别偏置。可在「模型与引擎」一键下载微调模型包。",
     "settings.engine": "模型与引擎",
@@ -109,6 +113,8 @@ const EXTRA = {
     "toast.need_name": "请先填写提示词名称",
     "toast.hotkey_invalid": "不支持这个热键",
     "status.ready": "就绪",
+    "status.asr_name": "语音识别",
+    "status.denoise_name": "语音降噪",
     "status.loading": "加载中",
     "status.off": "未启用",
     "status.error": "出错",
@@ -259,22 +265,37 @@ function renderStatus(s) {
   state.status = s || {};
   const asr = state.status;
   const backend = (asr.asr_backend || "").toUpperCase();
-  const asrLabel = asr.asr_ready
-    ? `${t("status.ready")} · ASR${backend ? ` (${backend})` : ""}`
+  // 灯里只放名字（语音识别），状态细节进 title / aria-label
+  setChip(
+    $("#chip-asr"),
+    asr.asr_ready ? "ok" : asr.error ? "err" : "pending",
+    t("status.asr_name"),
+  );
+  const asrState = asr.asr_ready
+    ? t("status.ready")
     : asr.error
-      ? `${t("status.error")} · ASR`
-      : `${t("status.loading")} · ASR`;
-  setChip($("#chip-asr"), asr.asr_ready ? "ok" : asr.error ? "err" : "pending", asrLabel);
+      ? t("status.error")
+      : t("status.loading");
+  const asrTitle = `${t("status.asr_name")} · ${asrState}${backend ? ` · ${backend}` : ""}`;
+  $("#chip-asr").title = asrTitle;
+  $("#chip-asr").setAttribute("aria-label", asrTitle);
 
   renderStyleModelState();
 
   const dn = !!state.cfg && !!state.cfg.denoise;
-  const dnLabel = dn
+  setChip(
+    $("#chip-denoise"),
+    dn ? (asr.denoise_ready ? "ok" : "pending") : "off",
+    t("status.denoise_name"),
+  );
+  const dnState = dn
     ? asr.denoise_ready
-      ? `${t("settings.denoise")} · ${t("status.ready")}`
-      : `${t("settings.denoise")} · ${t("status.loading")}`
-    : `${t("settings.denoise")} · ${t("status.off")}`;
-  setChip($("#chip-denoise"), dn ? (asr.denoise_ready ? "ok" : "pending") : "off", dnLabel);
+      ? t("status.ready")
+      : t("status.loading")
+    : t("status.off");
+  const dnTitle = `${t("status.denoise_name")} · ${dnState}`;
+  $("#chip-denoise").title = dnTitle;
+  $("#chip-denoise").setAttribute("aria-label", dnTitle);
 
   $("#dir-asr").textContent = asr.asr_dir || "—";
 
@@ -568,14 +589,16 @@ async function updateStylePromptArea() {
     ta.hidden = false;
     ta.classList.remove("disabled");
   } else {
+    // 预设文本只作展示，但文本框始终可编辑——一旦改动就自动切到「自定义提示词」，
+    // 避免「输入了却没有任何效果」的静默丢失
     try {
       ta.value = await invoke("get_style_preset_prompt", { key: preset });
     } catch {
       ta.value = "";
     }
-    ta.readOnly = true;
+    ta.readOnly = false;
     ta.hidden = false;
-    ta.classList.add("disabled");
+    ta.classList.remove("disabled");
   }
 }
 
@@ -679,6 +702,15 @@ function bindSettings() {
   }
   const taStyle = $("#style-prompt");
   if (taStyle) {
+    // 编辑预设文本 → 自动切到「自定义提示词」（否则改动会被静默忽略）
+    taStyle.addEventListener("input", async () => {
+      if ((state.cfg.style_preset || "") !== "custom") {
+        state.cfg.style_preset = "custom";
+        if (selStyle) selStyle.value = "custom";
+        await patchConfig({ style_preset: "custom" });
+        toast(t("toast.style_custom_on"), "ok", 1800);
+      }
+    });
     taStyle.addEventListener("change", async () => {
       if ((state.cfg.style_preset || "") !== "custom") return;
       await patchConfig({ style_prompt: taStyle.value });

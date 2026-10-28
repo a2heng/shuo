@@ -14,6 +14,11 @@
 - 实测（本机，2026-10-28）：ModelScope 直连单连接 ≈9.8 MB/s、上传 ≈6 MB/s；GitHub Release 直连 ≈30 KB/s；HuggingFace 直连超时（走代理 ≈0.4 MB/s），`hf-mirror.com` **只读、不能上传**（登录/写接口 404）
 - **模型作者是 [OrientCOMPASS](https://github.com/OrientCOMPASS)**（PR #1：数据 / LoRA 训练 / GGUF 量化）；a2heng 与主仓库只做托管分发，README / NOTICE / 模型卡均已写明；贡献者 fork 的 `OrientCOMPASS/shuo` pre-release `model-tuned-1.7B-pre` 仅作过渡，应用不再引用
 
+### UI — 顶栏指示灯常驻 + 窄窗口按钮左对齐
+- 状态指示改成**两颗小灯**（圆点，约 10 px）：`语音识别` / `语音降噪`，不再显示「就绪」等文字（状态靠颜色 / 闪烁，细节在 title 与 aria-label）
+- 窄窗口（≤640 px）**不再隐藏指示灯**（以前 `.chips { display: none }` 一缩窗口就消失）；顶栏改为换行：第一行品牌 + 两颗灯，第二行右侧按钮（热键徽标 / 设置）整体**靠左**
+- 设置页「输出风格」：编辑提示词框会自动切到「自定义提示词」（不再静默丢失），文案说明只有预设 / 训练覆盖的写法才生效
+
 ### 性能 — 推理提速（本机 10.4 s 音频 21 s → 2.2 s）
 - **线程数改物理核心**：原来 `available_parallelism()` 取逻辑线程（6C/12T → 12），llama.cpp 在超线程上严重过载；改 `num_cpus::get_physical()` 后 6 线程（实测 6 线程 2.4 s / 10 线程 4.8 s / 12 线程 19–40 s）；`SHUO_ASR_THREADS` / `SHUO_MTMD_THREADS` 可覆盖
 - **mtmd 音频编码线程数跟随**（llama.cpp 默认固定 4），`use_gpu=false`、`print_timings` 跟随 `SHUO_LLAMA_LOG`

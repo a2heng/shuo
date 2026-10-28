@@ -454,8 +454,14 @@ fn transcribe(
   };
   let total = t0.elapsed().as_secs_f64();
   if let Ok(ref r) = result {
+    let style = if context.trim().is_empty() {
+      "逐字转写（无提示词）".to_string()
+    } else {
+      let head: String = context.trim().chars().take(24).collect();
+      format!("{head}{}（{} 字）", if context.trim().chars().count() > 24 { "…" } else { "" }, context.trim().chars().count())
+    };
     crate::log_line(&format!(
-      "识别完成：音频 {audio_s:.2}s，降噪 {denoise_s:.2}s，ASR {:.2}s，总 {total:.2}s（RTF {:.2}）",
+      "识别完成：音频 {audio_s:.2}s，降噪 {denoise_s:.2}s，ASR {:.2}s，总 {total:.2}s（RTF {:.2}，风格：{style}）",
       r.asr_s,
       total / audio_s.max(0.01)
     ));

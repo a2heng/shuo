@@ -465,16 +465,18 @@ mod tests {
     let mut engine =
       GgufAsr::load(std::path::Path::new(&lm), std::path::Path::new(&mm), threads, 512).expect("load");
     eprintln!("LOAD threads={threads} {:.2}s", t.elapsed().as_secs_f64());
+    let context = std::env::var("SHUO_BENCH_CONTEXT").unwrap_or_default();
+    eprintln!("CONTEXT={context:?}");
     for i in 0..3 {
       let t = Instant::now();
-      let r = engine.transcribe_single(&wav, None, "", 512).expect("wav");
+      let r = engine.transcribe_single(&wav, None, &context, 512).expect("wav");
       let wall = t.elapsed().as_secs_f64();
       eprintln!(
         "RUN{i} audio={audio_s:.2}s asr={:.2}s wall={wall:.2}s RTF={:.3} tokens={} text={}",
         r.asr_s,
         wall / audio_s,
         r.tokens,
-        &r.text.chars().take(40).collect::<String>()
+        r.text
       );
     }
   }

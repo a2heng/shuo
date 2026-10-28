@@ -99,19 +99,24 @@ svg.sm { width: 15px; height: 15px; }
 .brand-text strong { font-size: 15px; letter-spacing: 0.2px; }
 .brand-text .ver { font-size: 11px; color: var(--muted); }
 
-.chips { display: flex; gap: 6px; margin-left: 6px; flex: 1; min-width: 0; }
+.chips { display: flex; align-items: center; gap: 8px; margin-left: 10px; flex: 1; min-width: 0; }
 
+/* 两颗小指示灯（语音识别 / 语音降噪）：圆点 + 短标签，紧凑胶囊；
+   「就绪」这类文字不显示，状态靠颜色/闪烁，细节在 title / aria-label。 */
 .chip {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 3px 9px;
+  display: inline-flex; align-items: center; gap: 5px;
+  flex: 0 0 auto;
+  padding: 2px 8px;
   border: 1px solid var(--border);
   border-radius: 999px;
-  font-size: 11.5px;
-  color: var(--muted);
   background: var(--panel-2);
+  font-size: 11px;
+  line-height: 15px;
+  color: var(--muted);
   white-space: nowrap;
 }
-.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .55; }
+.chip > span { display: inline; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); opacity: .35; }
 .chip.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, var(--border)); }
 .chip.ok .dot { background: var(--ok); opacity: 1; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent); }
 .chip.pending { color: var(--warn); }
@@ -510,14 +515,10 @@ kbd {
 ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 32%, transparent); border-radius: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* 窄窗口：上下布局 */
-@media (max-width: 640px) {
-  .main { grid-template-columns: 1fr; overflow: auto; }
-  .record-pane { border-right: 0; border-bottom: 1px solid var(--border); padding: 18px 14px; }
-  .result-pane { padding: 12px 12px 0; }
-  .chips { display: none; }
-  .text { max-height: 96px; }
-}
+/* 窄窗口：不做任何布局/尺寸切换。
+   （旧版这里会把分栏改上下、隐藏指示灯、改 padding —— 缩窗口时录音按钮会
+   向左上跳、灯会消失。窗口最小宽度 560px 已保证内容放得下，所以整页像
+   「同一张图变窄」：位置不动，只是可用宽度变小。） */
 
 /* ── v2 布局：小按钮 + 顶部结果 + 历史占大头 ───────────── */
 .main {
@@ -625,10 +626,8 @@ body.recording .rec-timer { color: var(--accent); }
 .history li:hover .h-copy { opacity: 1; }
 
 @media (max-width: 640px) {
+  /* 只允许内容超高时滚动；不改 padding / 栅格 / 外边距，避免任何跳变 */
   .main { overflow: auto; }
-  .composer { padding: 10px 12px 0; }
-  .cards { grid-template-columns: 1fr; }
-  .history-panel { margin: 10px 12px 0; }
 }
 
 /* 热键行：开关固定宽度，不要被首列 flex 拉长 */

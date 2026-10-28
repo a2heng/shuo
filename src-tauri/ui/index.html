@@ -56,8 +56,8 @@
       </div>
 
       <div class="chips" id="chips">
-        <span class="chip" id="chip-asr" title="ASR"><i class="dot"></i><span>ASR</span></span>
-        <span class="chip" id="chip-denoise"><i class="dot"></i><span data-i18n="settings.denoise">降噪</span></span>
+        <span class="chip" id="chip-asr" role="status" title="语音识别"><i class="dot"></i><span>语音识别</span></span>
+        <span class="chip" id="chip-denoise" role="status" title="语音降噪"><i class="dot"></i><span>语音降噪</span></span>
       </div>
 
       <div class="top-actions">
@@ -192,7 +192,7 @@
         </div>
         <textarea id="style-prompt" rows="3" spellcheck="false" hidden></textarea>
         <p class="hint" id="style-model-state"></p>
-        <p class="hint" data-i18n="settings.style_hint">微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。</p>
+        <p class="hint" data-i18n="settings.style_hint">微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。只有预设写法（及训练覆盖过的提示词）才生效，随手编的措辞通常会被忽略。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。</p>
       </section>
 
       <section class="group">
