@@ -569,7 +569,7 @@ body.recording .rec-timer { color: var(--accent); }
 
 .cards {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .cards .card { padding: 9px 12px 10px; min-width: 0; }
@@ -641,4 +641,32 @@ body.recording .rec-timer { color: var(--accent); }
 .row > label.switch + label {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* 一键下载模型：进度条（引擎设置区） */
+.dl-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+.dl-bar {
+  flex: 1 1 auto;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+.dl-bar i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transition: width .35s ease;
+}
+.dl-progress .small {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }

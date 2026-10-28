@@ -77,6 +77,23 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # llama-cpp-sys-2（bindgen）需要 libclang；预装则用，缺则 choco 装（ci.yml 同款）
+      - name: 准备 libclang（bindgen 用）
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\LLVM\bin",
+            "${env:ChocolateyInstall}\lib\llvm\tools\LLVM\bin"
+          )
+          $found = $candidates | Where-Object { Test-Path (Join-Path $_ 'libclang.dll') } | Select-Object -First 1
+          if (-not $found) {
+            Write-Host 'libclang not found, installing LLVM via choco ...'
+            choco install llvm --no-progress -y | Out-Null
+            $found = "$env:ProgramFiles\LLVM\bin"
+            if (-not (Test-Path (Join-Path $found 'libclang.dll'))) { throw 'LLVM installation failed' }
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$found"
+
       - name: 安装 tauri-cli
         run: |
           if ! command -v cargo-tauri >/dev/null 2>&1; then
@@ -118,6 +135,15 @@ jobs:
             libwebkit2gtk-4.1-dev libssl-dev libxdo-dev librsvg2-dev \
             libgtk-3-dev libasound2-dev libsoup-3.0-dev \
             pkg-config file
+
+      - name: 准备 libclang（llama-cpp-sys-2 的 bindgen 用）
+        run: |
+          set -e
+          if ! ldconfig -p | grep -q libclang; then
+            sudo apt-get install -y -qq libclang-dev clang >/dev/null
+          fi
+          LIBCLANG=$(dirname "$(find /usr/lib -name 'libclang.so*' 2>/dev/null | head -1)")
+          echo "LIBCLANG_PATH=$LIBCLANG" >> "$GITHUB_ENV"
 
       - name: 版本号写入构建配置（tag → tauri.conf.json + Cargo.toml）
         run: bash ./scripts/set-version.sh "$VERSION"

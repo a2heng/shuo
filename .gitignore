@@ -1,21 +1,20 @@
+# 模型目录 / 权重文件（本地放仓库根或 models/ 下；一律不入库）
 Qwen3-ASR-0.6B-ONNX-CPU
-Qwen3.5-2B-ONNX-OPT
+Qwen3-ASR-0.6B-ONNX-CPU-tuned
+Qwen3-ASR-1.7B-GGUF
+Qwen3-ASR-1.7B-GGUF-tuned
+models/
+*.gguf
+*.wav
 
 **/__pycache__/
 *.pyc
-*.wav
-Shuo.spec
 
 build
-build_version.py
 dist
-debug_audio
-/locales
+node_modules/
 
 # Rust / Tauri 编译产物
 src-tauri/target/
 src-tauri/gen/
 src-tauri/.tauri/
-
-# Node（Electron 对照实现已删除）
-node_modules/

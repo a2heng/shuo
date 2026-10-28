@@ -57,7 +57,6 @@
 
       <div class="chips" id="chips">
         <span class="chip" id="chip-asr" title="ASR"><i class="dot"></i><span>ASR</span></span>
-        <span class="chip" id="chip-llm" title="LLM"><i class="dot"></i><span>LLM</span></span>
         <span class="chip" id="chip-denoise"><i class="dot"></i><span data-i18n="settings.denoise">降噪</span></span>
       </div>
 
@@ -71,6 +70,7 @@
 
     <div class="banner" id="banner" hidden>
       <span id="banner-text"></span>
+      <button class="link" id="banner-download" data-i18n="btn.download_model" hidden>下载模型</button>
       <button class="link" id="banner-log">日志</button>
       <button class="icon-btn sm" id="banner-close" aria-label="关闭"><svg><use href="#i-x"/></svg></button>
     </div>
@@ -97,21 +97,11 @@
         </div>
 
         <div class="cards">
-          <div class="card" id="card-asr">
-            <header class="card-head">
-              <h3 data-i18n="result.asr">识别原文</h3>
-              <span class="badge" id="asr-lang"></span>
-              <button class="icon-btn sm" data-copy="asr" data-i18n-title="btn.copy" title="复制">
-                <svg><use href="#i-copy"/></svg>
-              </button>
-            </header>
-            <p class="text muted" id="asr-text">—</p>
-          </div>
-
           <div class="card accent" id="card-final">
             <header class="card-head">
-              <h3 data-i18n="result.final">整理结果</h3>
-              <span class="badge" id="meta-llm"></span>
+              <h3 data-i18n="result.final">识别结果</h3>
+              <span class="badge" id="asr-lang"></span>
+              <span class="badge" id="meta-final"></span>
               <button class="icon-btn sm" id="btn-copy" data-i18n-title="btn.copy" title="复制" disabled>
                 <svg><use href="#i-copy"/></svg>
               </button>
@@ -195,34 +185,31 @@
       </section>
 
       <section class="group">
-        <h3 class="group-title"><span data-i18n="settings.llm">LLM 后处理</span></h3>
+        <h3 class="group-title"><span data-i18n="settings.style">输出风格</span></h3>
         <div class="row">
-          <label data-i18n="settings.llm_enable">启用 LLM</label>
-          <label class="switch"><input type="checkbox" id="chk-llm" /><i></i></label>
+          <label data-i18n="settings.style_preset">风格提示词</label>
+          <select id="sel-style-preset"></select>
         </div>
-        <div class="row">
-          <label data-i18n="settings.llm_preset">提示词预设</label>
-          <select id="sel-preset"></select>
-        </div>
-        <div class="row">
-          <label data-i18n="settings.llm_saved">我的提示词</label>
-          <div class="row-controls">
-            <select id="sel-custom"></select>
-            <button class="btn sm" id="btn-apply-custom" data-i18n="btn.apply">应用</button>
-          </div>
-        </div>
-        <textarea id="llm-prompt" rows="7" spellcheck="false"></textarea>
-        <div class="row-controls end">
-          <input class="input sm" id="custom-name" data-i18n-placeholder="settings.prompt_name" placeholder="提示词名称" />
-          <button class="btn sm" id="btn-save-custom" data-i18n="btn.save_as">另存为</button>
-        </div>
-        <p class="hint" data-i18n="settings.llm_hint">LLM 会把口语转成书面文本（补标点、去口癖）。关闭时直接输出 ASR 原文。</p>
+        <textarea id="style-prompt" rows="3" spellcheck="false" hidden></textarea>
+        <p class="hint" id="style-model-state"></p>
+        <p class="hint" data-i18n="settings.style_hint">微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。</p>
       </section>
 
       <section class="group">
         <h3 class="group-title"><span data-i18n="settings.engine">模型与引擎</span></h3>
         <div class="kv"><span>ASR</span><code id="dir-asr">—</code></div>
-        <div class="kv"><span>LLM</span><code id="dir-llm">—</code></div>
+        <div class="row">
+          <label data-i18n="settings.model_download">模型下载</label>
+          <div class="row-controls">
+            <button class="btn sm primary" id="btn-download-model" data-i18n="btn.download_model">下载模型</button>
+            <button class="btn sm ghost" id="btn-open-release" data-i18n="btn.open_release">来源页面</button>
+          </div>
+        </div>
+        <div class="dl-progress" id="dl-progress" hidden>
+          <div class="dl-bar"><i id="dl-bar"></i></div>
+          <span class="muted small" id="dl-text"></span>
+        </div>
+        <p class="hint" data-i18n="settings.model_download_hint">一键从项目 GitHub Release 下载微调模型包（约 1.4 GB）到 ~/.shuo/models/，支持断点续传，完成后自动重载。</p>
         <div class="row-controls end">
           <button class="btn sm" id="btn-reload" data-i18n="btn.reload">重新加载</button>
           <button class="btn sm" id="btn-open-dir" data-i18n="btn.open_config">打开配置目录</button>

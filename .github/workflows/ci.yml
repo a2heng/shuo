@@ -1,0 +1,254 @@
+# ============================================================================
+# 说 · Shuo — 持续集成（push / PR 必跑，全绿才合并）
+#
+# 三个 job：
+#   rust-linux    WebKitGTK 等系统依赖 + cargo test --release（mel/llm/asr 单测；
+#                 模型类测试在 SHUO_ASR_DIR/仓库模型目录缺失时自动跳过——真实
+#                 模型 e2e 在 finetune.yml mode=ort-e2e 手动跑，不阻塞 push）
+#   rust-windows  cargo test --release（debug 下 esaxx C++ 依赖静态 CRT 混链炸 LNK2005；
+#                 release 两侧 /MD 一致，release.yml 已验证）
+#   py-ui         finetune/ 脚本语法与纯逻辑校验（不装 torch）：py_compile、
+#                 提示词对表（prompts.py ↔ asr.rs 逐字一致）、stub 优化器/静音
+#                 样本/对照表后端单测、ui/app.js 语法（node --check）、
+#                 locales JSON 可解析。
+#
+# 打包发版在 release.yml（tag 触发）；微调/补丁/真实模型验证在 finetune.yml
+# （手动触发，push 不消耗 runner）。
+# ============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**", "pr/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  # ------------------------------------------------------------------ Linux
+  rust-linux:
+    name: Rust 构建+单测 (ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 系统依赖（WebKitGTK 4.1 / ALSA，与 release.yml 同套）
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libssl-dev libxdo-dev librsvg2-dev \
+            libgtk-3-dev libasound2-dev libsoup-3.0-dev \
+            pkg-config file
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # llama-cpp-sys-2（bindgen）需要 libclang；cmake/C++ 编译器 runner 自带
+      - name: 准备 libclang（Linux，bindgen 用）
+        run: |
+          set -e
+          if ! ldconfig -p | grep -q libclang; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq libclang-dev clang >/dev/null
+          fi
+          LIBCLANG=$(dirname "$(find /usr/lib -name 'libclang.so*' 2>/dev/null | head -1)")
+          echo "LIBCLANG_PATH=$LIBCLANG" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=$LIBCLANG"
+
+      - name: 缓存 cargo 依赖与 target
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-linux-${{ hashFiles('src-tauri/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            rust-linux-${{ hashFiles('src-tauri/Cargo.lock') }}-
+
+      - name: 单元测试（release；模型缺失的用例自动跳过）
+        working-directory: src-tauri
+        run: cargo test --release
+
+      - name: 构建主程序（release 链接验证）
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: 组装测试构建目录（免安装直跑 + 说明）
+        run: |
+          set -e
+          mkdir -p dist-test
+          cp src-tauri/target/release/shuo dist-test/
+          cp src-tauri/target/release/libonnxruntime*.so* dist-test/ 2>/dev/null || true
+          cp src-tauri/resources/denoise.onnx dist-test/
+          cat > dist-test/README-test.txt <<'TXT'
+          Shuo 测试构建（CI 直出，非安装包）
+          ==================================
+          1. 整个目录解压到任意位置（denoise.onnx 与可执行文件保持同目录）；
+          2. chmod +x shuo && ./shuo（系统需 webkit2gtk-4.1 等库，同 deb 版依赖）；
+          3. 模型：首启横幅或 设置→模型与引擎→下载模型 一键拉取微调模型包（~1.4 GB），
+             或手动放 ~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/ 等目录；
+          4. 本构建来自 pr/single-model 分支，供功能体验测试。
+          TXT
+
+      - name: 上传测试构建 artifact（实机测试用，比 release.yml 全量打包快）
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-build-linux
+          path: dist-test
+          if-no-files-found: error
+          retention-days: 14
+
+  # ---------------------------------------------------------------- Windows
+  rust-windows:
+    name: Rust 构建+单测 (windows)
+    runs-on: windows-latest
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # llama-cpp-sys-2（bindgen）需要 libclang（qsa 同款探测：预装则用，缺则 choco 装）
+      - name: 准备 libclang（Windows，bindgen 用）
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "$env:ProgramFiles\LLVM\bin",
+            "${env:ChocolateyInstall}\lib\llvm\tools\LLVM\bin"
+          )
+          $found = $candidates | Where-Object { Test-Path (Join-Path $_ 'libclang.dll') } | Select-Object -First 1
+          if (-not $found) {
+            Write-Host 'libclang not found, installing LLVM via choco ...'
+            choco install llvm --no-progress -y | Out-Null
+            $found = "$env:ProgramFiles\LLVM\bin"
+            if (-not (Test-Path (Join-Path $found 'libclang.dll'))) { throw 'LLVM installation failed' }
+          }
+          Write-Host "Using LIBCLANG_PATH=$found"
+          Add-Content -Path $env:GITHUB_ENV -Value "LIBCLANG_PATH=$found"
+
+      - name: 缓存 cargo 依赖
+        uses: actions/cache@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: rust-win-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: rust-win-cargo-
+
+      # release profile：debug 下 esaxx_fast 的 C++ 依赖被 cc-rs 用静态 CRT（/MT →
+      # libcpmt.lib）编译，与 Rust 侧动态 CRT（msvcprt.lib）混链 → LNK2005/LNK1169
+      # （本仓库 windows 腿首跑实测）；release 两侧都是 /MD（release.yml 同款已验证）。
+      # windows_subsystem="windows" 只影响 PE 子系统标志：cargo 从控制台拉起测试
+      # 二进制时 std 句柄照常继承，输出与退出码判定不受影响。
+      - name: 单元测试（release）
+        working-directory: src-tauri
+        run: cargo test --release
+
+      - name: 构建主程序（release，测试构建产物）
+        working-directory: src-tauri
+        run: cargo build --release
+
+      - name: 组装测试构建目录（免安装直跑 + 说明）
+        run: |
+          set -e
+          mkdir -p dist-test
+          cp src-tauri/target/release/shuo.exe dist-test/
+          cp src-tauri/target/release/*.dll dist-test/ 2>/dev/null || true
+          cp src-tauri/resources/denoise.onnx dist-test/
+          cat > dist-test/README-test.txt <<'TXT'
+          Shuo 测试构建（CI 直出，非安装包）
+          ==================================
+          1. 整个目录解压到任意位置（denoise.onnx 与可执行文件保持同目录）；
+          2. 双击 shuo.exe 运行（需 WebView2 运行时 + VC++ 2015-2022 运行库，Win10/11 一般自带）；
+          3. 模型：首启横幅或 设置→模型与引擎→下载模型 一键拉取微调模型包（~1.4 GB），
+             或手动放 ~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/ 等目录；
+          4. 本构建来自 pr/single-model 分支，供功能体验测试。
+          TXT
+
+      - name: 上传测试构建 artifact（实机测试用，比 release.yml 全量打包快）
+        if: success()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-build-windows
+          path: dist-test
+          if-no-files-found: error
+          retention-days: 14
+
+  # ------------------------------------------------------ UI 契约
+  ui:
+    name: UI 语法与控制断言
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: app.js 语法 + locales JSON + UI 控制存在性/缺失断言
+        run: |
+          set -e
+          node --check src-tauri/ui/app.js
+          for f in src-tauri/ui/locales/*.json; do
+            node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "$f"
+          done
+          # 输出风格 UI 契约：预设下拉 / 提示词框 / 模型包状态行 / 一键下载必须都在
+          grep -q 'id="sel-style-preset"' src-tauri/ui/index.html
+          grep -q 'id="style-prompt"' src-tauri/ui/index.html
+          grep -q 'id="style-model-state"' src-tauri/ui/index.html
+          # 结果区单卡片（历史「识别原文/整理结果」双卡已合并）
+          ! grep -q 'id="card-asr"' src-tauri/ui/index.html
+          ! grep -q 'id="asr-text"' src-tauri/ui/index.html
+          ! grep -q 'data-copy' src-tauri/ui/index.html
+          grep -q 'id="final-text"' src-tauri/ui/index.html
+          grep -q 'id="asr-lang"' src-tauri/ui/index.html
+          grep -q 'id="btn-download-model"' src-tauri/ui/index.html
+          grep -q 'id="dl-progress"' src-tauri/ui/index.html
+          grep -q 'list_style_presets' src-tauri/ui/app.js
+          grep -q 'download_model' src-tauri/ui/app.js
+          grep -q 'model-download' src-tauri/ui/app.js
+          # TLS 走系统证书库（platform-verifier），不是烘焙的 webpki-roots
+          grep -q 'platform-verifier' src-tauri/Cargo.toml
+          grep -q 'PlatformVerifier' src-tauri/src/model_download.rs
+          # 防回归：「单模型直出/统一包」是历史话术，产品定位 = 提示词控制输出风格的 ASR
+          ! grep -q 'id="chip-single"' src-tauri/ui/index.html
+          ! grep -rq '单模型\|统一包\|直出' src-tauri/src src-tauri/ui
+          ! grep -rqi 'unified' src-tauri/src src-tauri/ui
+          ! grep -rq 'single_model' src-tauri/src/asr.rs src-tauri/src/state.rs src-tauri/src/main.rs src-tauri/src/models.rs src-tauri/src/model_download.rs src-tauri/src/gguf_asr.rs src-tauri/ui
+          # config.rs 里 single_model 仅允许作为旧配置兼容 alias 出现
+          [ "$(grep -c 'single_model' src-tauri/src/config.rs)" = "2" ]
+          grep -q 'alias = "single_model_preset"' src-tauri/src/config.rs
+          # 防回归：LLM 独立后处理管线的 UI / 命令 / 模块必须都不存在
+          ! grep -q 'id="chk-llm"' src-tauri/ui/index.html
+          ! grep -q 'id="llm-dir"' src-tauri/ui/index.html
+          ! grep -q 'set_llm_enabled' src-tauri/ui/app.js
+          ! grep -rq 'LlmPipeline' src-tauri/src/
+          test ! -f src-tauri/src/llm.rs
+          # PR 契约：本仓库是「调用模型的应用程序」——微调产线 / PySide legacy / Python i18n 工具必须不在
+          test ! -d finetune
+          test ! -d legacy
+          test ! -d i18n
+          test ! -f .github/workflows/finetune.yml
+          # 下载源做成常量（上游合并后改 RELEASE_REPO/RELEASE_TAG 即换成自己的 Release）
+          grep -q 'RELEASE_REPO' src-tauri/src/model_download.rs
+          grep -q 'RELEASE_TAG' src-tauri/src/model_download.rs
+          echo "UI_OK"

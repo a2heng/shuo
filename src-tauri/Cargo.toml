@@ -24,14 +24,23 @@ serde_json = "1"
 # ONNX 推理（构建时下载 onnxruntime 并把动态库复制到产物旁）
 ort = { version = "=2.0.0-rc.13", default-features = false, features = [
   "std",
-  "half",
   "download-binaries",
   "copy-dylibs",
   "tls-native",
   "api-27",
 ] }
-# float16 张量（Qwen3.5 的 KV / 卷积状态是 f16）
-half = "2"
+# ============================================================================
+# llama.cpp（GGUF 运行时）：Qwen3-ASR-1.7B 主推理路径（提示词控制输出风格）。
+# **源码静态链接**进可执行文件（无 llama.dll / ggml*.so 伴生）；mtmd feature 提供
+# 多模态音频路径（bindgen 自动生成 mtmd_* 绑定，qsa 已验证 0.1.157 可用）。
+# 版本 "=" 精确锁定：crate 内嵌 llama.cpp 源码构建，ABI 与 mtmd 头文件强绑定，
+# 升级需同步回归 gguf-e2e。CPU 后端静态编入；ort 保留给降噪模型与 LLM 后处理段。
+# 构建依赖：cmake + C/C++ 编译器 + libclang（bindgen）；CI 各腿的准备步骤见 ci.yml。
+# ============================================================================
+llama-cpp-sys-2 = { version = "=0.1.157", default-features = false, features = [
+  "openmp",
+  "mtmd",
+] }
 # 麦克风采集（Windows WASAPI / Linux ALSA）
 cpal = "0.18"
 # 重采样（录音设备原生采样率 → 16 kHz）
@@ -42,6 +51,10 @@ tokenizers = { version = "0.22", default-features = false, features = [
   "progressbar",
   "esaxx_fast",
 ] }
+# 模型一键下载（GitHub Release API + 资产流式落盘；阻塞式 HTTP，跑在独立线程）。
+# platform-verifier：TLS 证书走**系统信任库**（而非编译期烘焙的 webpki-roots），
+# 企业/本地代理做 TLS 拦截时，其 CA 只要装进操作系统即可正常下载。
+ureq = { version = "3", features = ["platform-verifier"] }
 # 梅尔频谱 / 降噪 STFT
 rustfft = "6"
 

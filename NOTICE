@@ -1,12 +1,34 @@
 Acknowledgements
 ================
 
-This project uses Qwen3-ASR-1.7B ONNX pipeline by andrewleech.
+Shuo is an application that calls locally-downloaded speech models. Model
+weights are the property of their respective authors and are NOT redistributed
+by this repository (they are fetched from GitHub Releases / Hugging Face at
+install time by the user).
 
-- Original model: Qwen3-ASR-1.7B by Qwen Team (https://huggingface.co/Qwen/Qwen3-ASR-1.7B)
-- Official repo: https://github.com/QwenLM/Qwen3-ASR
-- Technical report: https://arxiv.org/abs/2601.21337
-- ONNX export: https://github.com/andrewleech/qwen3-asr-onnx
-- Pre-built model: https://huggingface.co/andrewleech/qwen3-asr-1.7b-onnx
+Primary ASR model (fine-tuned package, prompt-controlled output style):
 
-Model weights license: https://huggingface.co/Qwen/Qwen3-ASR-1.7B
+- Base model: Qwen3-ASR-1.7B by Qwen Team — Apache License 2.0
+  https://huggingface.co/Qwen/Qwen3-ASR-1.7B
+  Official repo: https://github.com/QwenLM/Qwen3-ASR
+  Technical report: https://arxiv.org/abs/2601.21337
+- GGUF conversion tooling: ggml-org/llama.cpp — MIT License
+  Official GGUF release: https://huggingface.co/ggml-org/Qwen3-ASR-1.7B-GGUF
+- The distributed fine-tuned package is a LoRA fine-tune of the base model
+  (transcription with prompt-controlled output style, in one pass); provenance
+  (base / adapter / prompts / timestamp) is recorded in the package's
+  shuo-model.json marker file.
+
+Fallback ASR model (ONNX backend, optional):
+
+- Pre-built ONNX package: Daumee/Qwen3-ASR-0.6B-ONNX-CPU
+  https://huggingface.co/Daumee/Qwen3-ASR-0.6B-ONNX-CPU
+- ONNX export lineage: andrewleech/qwen3-asr-onnx
+  https://github.com/andrewleech/qwen3-asr-onnx
+
+Denoiser (bundled with the app):
+
+- src-tauri/resources/denoise.onnx — streaming NFT_960 denoiser (48 kHz).
+
+Runtime libraries: llama.cpp (MIT), ONNX Runtime (MIT), Tauri (MIT/Apache-2.0),
+cpal (Apache-2.0/MIT), tokenizers (Apache-2.0), ureq (MIT/Apache-2.0).

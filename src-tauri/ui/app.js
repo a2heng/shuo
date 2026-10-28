@@ -2,8 +2,8 @@
 //
 // 与 Rust 端约定：
 //   命令：bootstrap / save_config / set_hotkey / start_record / stop_record
-//        / copy_text / list_mics / list_presets / get_preset_prompt
-//        / get_custom_prompts / save_custom_prompts / get_history / clear_history
+//        / copy_text / list_mics / list_asr_presets / get_asr_preset_prompt
+//        / get_history / clear_history
 //        / restart_recorder / reload_engine / open_user_dir / open_log / hide_window / quit_app
 //   事件：engine-status / rec / processing / asr / final / asr-error / notice / hotkey / recorder
 //
@@ -19,8 +19,7 @@ const { listen } = window.__TAURI__.event;
 
 const EXTRA = {
   en: {
-    "result.asr": "Original",
-    "result.final": "Polished",
+    "result.final": "Result",
     "record.hold": "Hold to talk, release to stop",
     "history.title": "History",
     "history.empty": "No history yet",
@@ -28,23 +27,28 @@ const EXTRA = {
     "btn.copy": "Copy",
     "btn.record_key": "Record",
     "btn.refresh": "Refresh",
-    "btn.apply": "Apply",
-    "btn.save_as": "Save as",
     "btn.reload": "Reload",
     "btn.open_config": "Open config folder",
     "btn.open_log": "Open log",
     "settings.hotkey_key": "Global hotkey (Ctrl+V paste)",
     "settings.hotkey_terminal_key": "Terminal hotkey (Ctrl+Shift+V paste)",
     "settings.hotkey_tip": "Hold to talk: press to start, release to stop. The two hotkeys are independent and can be switched off separately.",
-    "settings.llm": "LLM post-processing",
-    "settings.llm_enable": "Enable LLM",
-    "settings.llm_preset": "Prompt preset",
-    "settings.llm_saved": "My prompts",
-    "settings.llm_custom": "Custom prompt",
-    "settings.prompt_name": "Prompt name",
-    "settings.llm_hint": "The LLM turns spoken words into written text (punctuation, filler removal). When off, the raw ASR text is used.",
+    "settings.style": "Output style",
+    "settings.style_preset": "Style prompt",
+    "settings.style_custom": "Custom prompt",
+    "settings.style_hint": "The fine-tuned model follows the style prompt while transcribing (polish / translate / brief / detail). Get it with the in-app download under Models & engine; on a base model the prompt only biases recognition — pick Verbatim for zero bias.",
+    "settings.style_state_tuned": "Fine-tuned model detected — the style prompt is executed as an instruction.",
+    "settings.style_state_base": "Base model (no shuo-model.json) — the prompt only biases recognition. Download the fine-tuned model under Models & engine.",
     "settings.engine": "Models & engine",
     "settings.interface": "Interface",
+    "settings.model_download": "Model download",
+    "settings.model_download_hint": "One-click download of the fine-tuned model (~1.4 GB, Qwen3-ASR-1.7B GGUF) from the project's GitHub Release into ~/.shuo/models/. Resumable; the engine reloads automatically when done.",
+    "btn.download_model": "Download model",
+    "btn.open_release": "Source page",
+    "toast.dl_started": "Download started — progress under Settings → Models & engine",
+    "toast.dl_done": "Model ready",
+    "toast.dl_error": "Download failed",
+    "dl.preparing": "Fetching release metadata…",
     "rec.capturing": "Press a new hotkey (mouse/keyboard)…",
     "toast.copied": "Copied",
     "toast.saved": "Saved",
@@ -62,12 +66,11 @@ const EXTRA = {
     "confirm.clear": "Clear all history? This cannot be undone.",
     "banner.hotkey": "Global hotkey unavailable",
     "about.version": "Version",
-    "about.engine": "ASR: Qwen3-ASR-0.6B (ONNX CPU) · LLM: Qwen3.5-2B (ONNX)",
-    "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + ort",
+    "about.engine": "ASR: Qwen3-ASR (GGUF 1.7B / ONNX 0.6B) — transcription with prompt-controlled output style",
+    "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + llama.cpp/ort",
   },
   zh: {
-    "result.asr": "识别原文",
-    "result.final": "整理结果",
+    "result.final": "识别结果",
     "record.hold": "按住说话，松开结束",
     "history.title": "历史记录",
     "history.empty": "还没有记录",
@@ -75,23 +78,28 @@ const EXTRA = {
     "btn.copy": "复制",
     "btn.record_key": "录制",
     "btn.refresh": "刷新",
-    "btn.apply": "应用",
-    "btn.save_as": "另存为",
     "btn.reload": "重新加载",
     "btn.open_config": "打开配置目录",
     "btn.open_log": "打开日志",
     "settings.hotkey_key": "全局热键（Ctrl+V 上屏）",
     "settings.hotkey_terminal_key": "终端热键（Ctrl+Shift+V 上屏）",
     "settings.hotkey_tip": "按住说话：按下开始，松开结束。两个热键互相独立，可分别开关。",
-    "settings.llm": "LLM 后处理",
-    "settings.llm_enable": "启用 LLM",
-    "settings.llm_preset": "提示词预设",
-    "settings.llm_saved": "我的提示词",
-    "settings.llm_custom": "自定义提示词",
-    "settings.prompt_name": "提示词名称",
-    "settings.llm_hint": "LLM 会把口语转成书面文本（补标点、去口癖）。关闭时直接输出 ASR 原文。",
+    "settings.style": "输出风格",
+    "settings.style_preset": "风格提示词",
+    "settings.style_custom": "自定义提示词",
+    "settings.style_hint": "微调模型包按提示词控制输出风格（书面化/翻译/简略/详细）。可在「模型与引擎」一键下载；基座包上提示词仅作识别偏置，选「逐字转写」可完全消除偏置。",
+    "settings.style_state_tuned": "已检测到微调模型包——提示词会被当作风格指令执行。",
+    "settings.style_state_base": "当前为基座模型包（无 shuo-model.json）——提示词仅作识别偏置。可在「模型与引擎」一键下载微调模型包。",
     "settings.engine": "模型与引擎",
     "settings.interface": "界面",
+    "settings.model_download": "模型下载",
+    "settings.model_download_hint": "一键从项目 GitHub Release 下载微调模型包（约 1.4 GB，Qwen3-ASR-1.7B GGUF）到 ~/.shuo/models/，支持断点续传，完成后自动重载引擎。",
+    "btn.download_model": "下载模型",
+    "btn.open_release": "来源页面",
+    "toast.dl_started": "已开始下载——进度见 设置 → 模型与引擎",
+    "toast.dl_done": "模型已就绪",
+    "toast.dl_error": "下载失败",
+    "dl.preparing": "正在查询 Release 元数据…",
     "rec.capturing": "请按下新的热键（鼠标/键盘）…",
     "toast.copied": "已复制",
     "toast.saved": "已保存",
@@ -109,8 +117,8 @@ const EXTRA = {
     "confirm.clear": "确定清空所有历史记录？此操作不可撤销。",
     "banner.hotkey": "全局热键不可用",
     "about.version": "版本",
-    "about.engine": "ASR：Qwen3-ASR-0.6B（ONNX CPU） · LLM：Qwen3.5-2B（ONNX）",
-    "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + ort",
+    "about.engine": "ASR：Qwen3-ASR（GGUF 1.7B / ONNX 0.6B）——提示词控制输出风格的语音转写",
+    "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + llama.cpp/ort",
   },
 };
 
@@ -145,8 +153,7 @@ const state = {
   cfg: {},
   status: {},
   history: [],
-  presets: [],
-  custom: {},
+  presetsStyle: [],
   micList: [],
   locales: [],
   recording: false,
@@ -251,20 +258,15 @@ function setChip(el, kind, label) {
 function renderStatus(s) {
   state.status = s || {};
   const asr = state.status;
+  const backend = (asr.asr_backend || "").toUpperCase();
   const asrLabel = asr.asr_ready
-    ? `${t("status.ready")} · ASR`
+    ? `${t("status.ready")} · ASR${backend ? ` (${backend})` : ""}`
     : asr.error
       ? `${t("status.error")} · ASR`
       : `${t("status.loading")} · ASR`;
   setChip($("#chip-asr"), asr.asr_ready ? "ok" : asr.error ? "err" : "pending", asrLabel);
 
-  const llmOn = !!(state.cfg && state.cfg.llm_enabled);
-  const llmLabel = !llmOn
-    ? `LLM · ${t("status.off")}`
-    : asr.llm_ready
-      ? `LLM · ${t("status.ready")}`
-      : `${t("status.loading")} · LLM`;
-  setChip($("#chip-llm"), !llmOn ? "off" : asr.llm_ready ? "ok" : "pending", llmLabel);
+  renderStyleModelState();
 
   const dn = !!state.cfg && !!state.cfg.denoise;
   const dnLabel = dn
@@ -275,30 +277,28 @@ function renderStatus(s) {
   setChip($("#chip-denoise"), dn ? (asr.denoise_ready ? "ok" : "pending") : "off", dnLabel);
 
   $("#dir-asr").textContent = asr.asr_dir || "—";
-  $("#dir-llm").textContent = asr.llm_dir || "—";
 
   const banner = $("#banner");
   if (asr.error) {
     $("#banner-text").textContent = asr.error;
     banner.hidden = false;
+    // 模型缺失/加载失败时，横幅直接给一键下载入口（重新下载可续传修复损坏文件）
+    $("#banner-download").hidden = !!asr.loading;
   } else {
     banner.hidden = true;
   }
 
-  const loading = (asr.loading && !asr.asr_ready) || asr.llm_loading;
+  const loading = asr.loading && !asr.asr_ready;
   $("#loading").hidden = !loading;
   if (loading) {
-    $("#loading-text").textContent = asr.llm_loading && asr.asr_ready
-      ? "LLM"
-      : t("loading.model");
+    $("#loading-text").textContent = t("loading.model");
   }
 
   const canRecord = !!asr.asr_ready;
   $("#record").disabled = !canRecord || state.recording;
 
   const bits = [];
-  if (asr.asr_ready) bits.push("ASR");
-  if (asr.llm_ready) bits.push("LLM");
+  if (asr.asr_ready) bits.push(backend ? `ASR·${backend}` : "ASR");
   if (asr.denoise_ready) bits.push(t("settings.denoise"));
   $("#engine-line").textContent = bits.length
     ? bits.join(" · ")
@@ -323,10 +323,7 @@ function renderHotkeyBadge() {
 }
 
 function renderResult() {
-  const asr = state.current.asr;
   const final = state.current.final;
-  $("#asr-text").textContent = asr || "—";
-  $("#asr-text").classList.toggle("muted", !asr);
   $("#final-text").textContent = final || "—";
   $("#final-text").classList.toggle("muted", !final);
   $("#btn-copy").disabled = !final;
@@ -544,10 +541,11 @@ function fillMics() {
   sel.value = saved;
 }
 
-function fillPresets() {
-  const sel = $("#sel-preset");
+function fillStylePresets() {
+  const sel = $("#sel-style-preset");
+  if (!sel) return;
   sel.innerHTML = "";
-  for (const p of state.presets) {
+  for (const p of state.presetsStyle) {
     const o = document.createElement("option");
     o.value = p.key;
     o.textContent = presetName(p);
@@ -555,23 +553,29 @@ function fillPresets() {
   }
   const custom = document.createElement("option");
   custom.value = "custom";
-  custom.textContent = t("settings.llm_custom");
+  custom.textContent = t("settings.style_custom");
   sel.append(custom);
-  sel.value = state.cfg.llm_preset || "standard";
+  sel.value = state.cfg.style_preset || "polish_zh";
 }
 
-function fillCustomPrompts() {
-  const sel = $("#sel-custom");
-  sel.innerHTML = "";
-  const none = document.createElement("option");
-  none.value = "";
-  none.textContent = "—";
-  sel.append(none);
-  for (const name of Object.keys(state.custom)) {
-    const o = document.createElement("option");
-    o.value = name;
-    o.textContent = name;
-    sel.append(o);
+async function updateStylePromptArea() {
+  const ta = $("#style-prompt");
+  if (!ta) return;
+  const preset = state.cfg.style_preset || "polish_zh";
+  if (preset === "custom") {
+    ta.value = state.cfg.style_prompt || "";
+    ta.readOnly = false;
+    ta.hidden = false;
+    ta.classList.remove("disabled");
+  } else {
+    try {
+      ta.value = await invoke("get_style_preset_prompt", { key: preset });
+    } catch {
+      ta.value = "";
+    }
+    ta.readOnly = true;
+    ta.hidden = false;
+    ta.classList.add("disabled");
   }
 }
 
@@ -581,35 +585,36 @@ function syncSettings() {
   $("#chk-auto-type").checked = !!c.auto_type;
   $("#chk-history").checked = !!c.save_history;
   $("#chk-remove-punc").checked = !!c.remove_punc;
-  $("#chk-llm").checked = !!c.llm_enabled;
   $("#row-remove-punc").style.display = isZh() ? "" : "none";
   $("#chk-hotkey").checked = c.hotkey_enabled !== false;
   $("#chk-hotkey-terminal").checked = c.hotkey_terminal_enabled !== false;
   $("#hotkey-value-terminal").textContent = c.hotkey_terminal || "—";
   fillMics();
   fillAsrLangs();
-  fillPresets();
-  fillCustomPrompts();
+  fillStylePresets();
   fillLocales();
   renderHotkeyBadge();
-  updatePromptArea();
+  updateStylePromptArea();
+  renderStyleModelState();
 }
 
-async function updatePromptArea() {
-  const preset = state.cfg.llm_preset || "standard";
-  const ta = $("#llm-prompt");
-  if (preset === "custom") {
-    ta.value = state.cfg.llm_system_prompt || "";
-    ta.readOnly = false;
-    ta.classList.remove("disabled");
-  } else {
-    try {
-      ta.value = await invoke("get_preset_prompt", { key: preset });
-    } catch {
-      ta.value = "";
-    }
-    ta.readOnly = true;
-  }
+function renderStyleModelState() {
+  const el = $("#style-model-state");
+  if (!el) return;
+  const tuned = !!(state.status && state.status.style_model);
+  el.textContent = tuned
+    ? "✔ " + t("settings.style_state_tuned")
+    : "⚠ " + t("settings.style_state_base");
+}
+
+// 最终卡片角标：微调包生效且非「逐字转写」时，显示当前风格预设名
+function styleBadgeText(p) {
+  if (!p || !p.style_model) return "";
+  const key = (state.cfg && state.cfg.style_preset) || "polish_zh";
+  if (key === "verbatim") return "";
+  if (key === "custom") return t("settings.style_custom");
+  const info = (state.presetsStyle || []).find((x) => x.key === key);
+  return info ? presetName(info) : key;
 }
 
 function bindSettings() {
@@ -632,6 +637,24 @@ function bindSettings() {
     if (e.key === "Escape" && !$("#drawer").hidden) close();
   });
 
+  // 一键下载微调模型包（GitHub Release → ~/.shuo/models/；进度走 model-download 事件）
+  const startDownload = async () => {
+    try {
+      await invoke("download_model");
+      $("#btn-download-model").disabled = true;
+      toast(t("toast.dl_started"), "ok", 2000);
+    } catch (e) {
+      toast(String(e), "err", 3200);
+    }
+  };
+  $("#btn-download-model").addEventListener("click", startDownload);
+  $("#btn-open-release").addEventListener("click", () => invoke("open_release_page"));
+  // 横幅快捷入口：启动下载并展开设置抽屉看进度
+  $("#banner-download").addEventListener("click", async () => {
+    await startDownload();
+    open();
+  });
+
   $("#chk-denoise").addEventListener("change", async (e) => {
     await patchConfig({ denoise: e.target.checked });
     renderStatus(state.status);
@@ -647,10 +670,21 @@ function bindSettings() {
     renderHistory();
   });
   $("#chk-remove-punc").addEventListener("change", (e) => patchConfig({ remove_punc: e.target.checked }));
-  $("#chk-llm").addEventListener("change", async (e) => {
-    await patchConfig({ llm_enabled: e.target.checked });
-    renderStatus(state.status);
-  });
+  const selStyle = $("#sel-style-preset");
+  if (selStyle) {
+    selStyle.addEventListener("change", async (e) => {
+      await patchConfig({ style_preset: e.target.value });
+      await updateStylePromptArea();
+    });
+  }
+  const taStyle = $("#style-prompt");
+  if (taStyle) {
+    taStyle.addEventListener("change", async () => {
+      if ((state.cfg.style_preset || "") !== "custom") return;
+      await patchConfig({ style_prompt: taStyle.value });
+      toast(t("toast.saved"), "ok", 1200);
+    });
+  }
 
   $("#sel-mic").addEventListener("change", async (e) => {
     const dev = e.target.value || null;
@@ -674,56 +708,6 @@ function bindSettings() {
   $("#chk-hotkey-terminal").addEventListener("change", async (e) => {
     await patchConfig({ hotkey_terminal_enabled: e.target.checked });
     renderHotkeyBadge();
-  });
-
-  $("#sel-preset").addEventListener("change", async (e) => {
-    const key = e.target.value;
-    await patchConfig({ llm_preset: key });
-    await updatePromptArea();
-  });
-
-  $("#llm-prompt").addEventListener("change", async () => {
-    if ((state.cfg.llm_preset || "") !== "custom") return;
-    const text = $("#llm-prompt").value;
-    await patchConfig({ llm_system_prompt: text });
-    toast(t("toast.saved"), "ok", 1200);
-  });
-
-  $("#sel-custom").addEventListener("change", async (e) => {
-    const name = e.target.value;
-    if (!name) return;
-    const body = state.custom[name] || "";
-    $("#llm-prompt").value = body;
-    await patchConfig({ llm_preset: "custom", llm_system_prompt: body });
-    $("#sel-preset").value = "custom";
-    toast(t("toast.saved"), "ok", 1200);
-  });
-
-  $("#btn-apply-custom").addEventListener("click", async () => {
-    const name = $("#sel-custom").value;
-    if (!name) return;
-    const body = state.custom[name] || "";
-    $("#llm-prompt").value = body;
-    await patchConfig({ llm_preset: "custom", llm_system_prompt: body });
-    $("#sel-preset").value = "custom";
-    toast(t("toast.saved"), "ok", 1200);
-  });
-
-  $("#btn-save-custom").addEventListener("click", async () => {
-    const name = $("#custom-name").value.trim();
-    if (!name) {
-      toast(t("toast.need_name"), "err");
-      return;
-    }
-    state.custom[name] = $("#llm-prompt").value;
-    try {
-      await invoke("save_custom_prompts", { prompts: state.custom });
-      fillCustomPrompts();
-      $("#sel-custom").value = name;
-      toast(t("toast.saved"), "ok", 1400);
-    } catch (e) {
-      toast(String(e), "err");
-    }
   });
 
   $("#sel-ui-lang").addEventListener("change", async (e) => {
@@ -768,12 +752,6 @@ function bindSettings() {
 }
 
 function bindResultActions() {
-  $$("[data-copy]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const which = btn.dataset.copy;
-      copyText(which === "asr" ? state.current.asr : state.current.final);
-    });
-  });
   $("#btn-copy").addEventListener("click", () => copyText(state.current.final));
   $("#history").addEventListener("click", () => {});
 }
@@ -881,6 +859,37 @@ function stopCapture() {
 
 async function bindEvents() {
   await listen("engine-status", (e) => renderStatus(e.payload));
+  await listen("model-download", (e) => {
+    const p = e.payload || {};
+    const box = $("#dl-progress");
+    const bar = $("#dl-bar");
+    const txt = $("#dl-text");
+    const btn = $("#btn-download-model");
+    if (p.phase === "error") {
+      box.hidden = true;
+      btn.disabled = false;
+      toast(`${t("toast.dl_error")}: ${p.error || ""}`, "err", 5200);
+      return;
+    }
+    if (p.phase === "done") {
+      box.hidden = true;
+      btn.disabled = false;
+      toast(t("toast.dl_done"), "ok", 2600);
+      return;
+    }
+    btn.disabled = true;
+    box.hidden = false;
+    if (p.phase === "preparing") {
+      bar.style.width = "0%";
+      txt.textContent = t("dl.preparing");
+      return;
+    }
+    const frac = p.asset_total ? p.asset_received / p.asset_total : 0;
+    const done = p.assets_total ? (p.assets_done + frac) / p.assets_total : 0;
+    bar.style.width = `${Math.round(done * 100)}%`;
+    const mb = (n) => (Number(n) / 2 ** 20).toFixed(0);
+    txt.textContent = `${p.asset} ${mb(p.asset_received)}/${mb(p.asset_total)} MiB · ${Math.round(done * 100)}%`;
+  });
   await listen("rec", (e) => onRecEvent(e.payload));
   await listen("recorder", (e) => {
     if (!e.payload.ok) toast(e.payload.error || "recorder error", "err");
@@ -888,7 +897,7 @@ async function bindEvents() {
   await listen("processing", () => {
     state.current = { asr: "", final: "", language: "" };
     renderResult();
-    $("#meta-llm").textContent = "";
+    $("#meta-final").textContent = "";
     renderMeta(t("meta.processing"));
     $("#btn-copy").disabled = true;
   });
@@ -897,7 +906,7 @@ async function bindEvents() {
     state.current.asr = p.text || "";
     state.current.language = p.language || "";
     state.current.final = p.text || "";
-    $("#meta-llm").textContent = "";
+    $("#meta-final").textContent = "";
     renderResult();
     const parts = [];
     if (p.language) parts.push(langName(p.language));
@@ -908,18 +917,16 @@ async function bindEvents() {
   await listen("final", (e) => {
     const p = e.payload;
     state.current.asr = p.asr_text || state.current.asr;
-    state.current.final = p.text || p.llm_text || p.asr_text || "";
+    state.current.final = p.text || p.asr_text || "";
     renderResult();
-    const parts = [];
-    if (p.llm_text) parts.push(t("result.final"));
-    if (p.llm_s) parts.push(`LLM ${Number(p.llm_s).toFixed(2)}s`);
-    renderMeta(parts.join(" · "));
-    $("#meta-llm").textContent = p.llm_text ? `LLM ${Number(p.llm_s || 0).toFixed(1)}s` : "";
+    const badge = styleBadgeText(p);
+    renderMeta(badge);
+    $("#meta-final").textContent = badge;
 
     if (state.cfg.save_history) {
       state.history.unshift({
         asr_text: p.asr_text,
-        llm_text: p.llm_text || null,
+        llm_text: null,
         time: p.time || "",
       });
       if (state.history.length > 500) state.history.length = 500;
@@ -976,6 +983,12 @@ async function main() {
   state.platform = boot.platform || "";
   state.hotkeySupported = !!boot.hotkey_supported;
 
+  // 若后台已有下载在进行（窗口重载前触发），恢复按钮禁用态
+  try {
+    const info = await invoke("model_download_info");
+    if (info && info.downloading) $("#btn-download-model").disabled = true;
+  } catch {}
+
   const lang = state.cfg.language || "en";
   try {
     await loadLocale(lang);
@@ -985,14 +998,9 @@ async function main() {
   }
 
   try {
-    state.presets = await invoke("list_presets");
+    state.presetsStyle = await invoke("list_style_presets");
   } catch {
-    state.presets = [];
-  }
-  try {
-    state.custom = await invoke("get_custom_prompts");
-  } catch {
-    state.custom = {};
+    state.presetsStyle = [];
   }
   try {
     state.micList = await invoke("list_mics");

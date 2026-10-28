@@ -1,6 +1,6 @@
 // 说 · Shuo — 应用状态与识别线程
 //
-// 单一线程串行处理识别任务（ASR → LLM），与 Python 版的队列语义一致。
+// 单一线程串行处理识别任务（ASR 输出即最终文本），与 Python 版的队列语义一致。
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
@@ -15,8 +15,44 @@ use crate::asr::AsrPipeline;
 use crate::audio::RecorderHandle;
 use crate::config::{Config, HistoryItem};
 use crate::denoise::Denoiser;
-use crate::llm::{LlmPipeline, Sampling, preset_prompt};
-use crate::models::{self, ModelPaths};
+use crate::gguf_asr::GgufAsr;
+use crate::models::{self, Backend, ModelPaths};
+
+/// ASR 推理引擎：ONNX（ort，Daumee 0.6B 包）或 GGUF（llama.cpp，1.7B）。
+/// 两条路径对外同接口（transcribe/transcribe_single → AsrResult），worker 无差别调度。
+pub enum AsrEngine {
+  Onnx(AsrPipeline),
+  Gguf(GgufAsr),
+}
+
+impl AsrEngine {
+  pub fn transcribe(
+    &mut self,
+    wav: &[f32],
+    language: Option<&str>,
+    context: &str,
+    max_new_tokens: usize,
+    chunk_sec: usize,
+  ) -> Result<crate::asr::AsrResult, String> {
+    match self {
+      AsrEngine::Onnx(p) => p.transcribe(wav, language, context, max_new_tokens, chunk_sec),
+      AsrEngine::Gguf(p) => p.transcribe(wav, language, context, max_new_tokens, chunk_sec),
+    }
+  }
+
+  pub fn transcribe_single(
+    &mut self,
+    wav: &[f32],
+    language: Option<&str>,
+    context: &str,
+    max_new_tokens: usize,
+  ) -> Result<crate::asr::AsrResult, String> {
+    match self {
+      AsrEngine::Onnx(p) => p.transcribe_single(wav, language, context, max_new_tokens),
+      AsrEngine::Gguf(p) => p.transcribe_single(wav, language, context, max_new_tokens),
+    }
+  }
+}
 
 pub struct Job {
   pub samples: Vec<f32>,
@@ -29,12 +65,13 @@ pub struct Job {
 pub struct Status {
   pub loading: bool,
   pub asr_ready: bool,
-  pub llm_ready: bool,
-  pub llm_loading: bool,
   pub asr_dir: Option<String>,
-  pub llm_dir: Option<String>,
   pub error: Option<String>,
   pub denoise_ready: bool,
+  /// 当前模型包是否为微调包（system 段提示词可当任务指令，控制输出风格）
+  pub style_model: bool,
+  /// 当前 ASR 推理后端："onnx" / "gguf" / ""（未加载）
+  pub asr_backend: String,
 }
 
 #[derive(Clone)]
@@ -94,8 +131,7 @@ pub struct AppState {
   pub app: AppHandle,
   pub cfg: Mutex<Config>,
   pub paths: Mutex<ModelPaths>,
-  pub asr: Mutex<Option<AsrPipeline>>,
-  pub llm: Mutex<Option<LlmPipeline>>,
+  pub asr: Mutex<Option<AsrEngine>>,
   pub denoiser: Mutex<Option<Denoiser>>,
   pub status: Mutex<Status>,
   pub recorder: Mutex<Option<RecorderHandle>>,
@@ -112,19 +148,17 @@ impl AppState {
     let status = Status {
       loading: true,
       asr_ready: false,
-      llm_ready: false,
-      llm_loading: false,
       asr_dir: paths.asr.as_ref().map(|p| p.display().to_string()),
-      llm_dir: paths.llm.as_ref().map(|p| p.display().to_string()),
       error: None,
       denoise_ready: false,
+      style_model: paths.asr_tuned,
+      asr_backend: String::new(),
     };
     let state = Arc::new(Self {
       app: app.clone(),
       cfg: Mutex::new(cfg),
       paths: Mutex::new(paths),
       asr: Mutex::new(None),
-      llm: Mutex::new(None),
       denoiser: Mutex::new(None),
       status: Mutex::new(status),
       recorder: Mutex::new(None),
@@ -159,7 +193,7 @@ impl AppState {
     self.next_id.fetch_add(1, Ordering::Relaxed)
   }
 
-  /// 配置变更后重新解析模型路径并（按需）加载 LLM。
+  /// 配置变更后重新解析模型路径（引擎重载见 `reload_engine_full`）。
   pub fn reload_models(self: &Arc<Self>) {
     let cfg = self.config();
     let paths = models::resolve(&cfg);
@@ -167,13 +201,21 @@ impl AppState {
       let mut p = self.paths.lock().unwrap();
       *p = paths.clone();
     }
+    let cur_backend = self.status.lock().unwrap().asr_backend.clone();
     self.set_status(|s| {
       s.asr_dir = paths.asr.as_ref().map(|p| p.display().to_string());
-      s.llm_dir = paths.llm.as_ref().map(|p| p.display().to_string());
+      s.style_model = if cur_backend == "gguf" { paths.gguf_tuned } else { paths.asr_tuned };
     });
-    if cfg.llm_enabled && self.llm.lock().unwrap().is_none() {
-      spawn_llm_loader(self.clone());
+  }
+
+  /// 完整重载：重新解析路径并重启加载线程（「重新加载」按钮与模型下载完成后调用）。
+  /// 加载器完成时会原子替换 `asr` 槽位（Mutex 保护，worker 正在识别则等锁释放）。
+  pub fn reload_engine_full(self: &Arc<Self>) {
+    self.reload_models();
+    if self.status.lock().unwrap().loading {
+      return; // 已在加载，避免双份加载
     }
+    spawn_loader(self.clone());
   }
 
   /// 按配置（重新）启动录音。
@@ -243,40 +285,90 @@ fn spawn_loader(state: Arc<AppState>) {
       let paths = state.paths.lock().unwrap().clone();
       let threads = crate::threads();
 
-      let Some(asr_dir) = paths.asr.clone() else {
+      let backend = models::pick_backend(&cfg, &paths);
+      let Some(backend) = backend else {
         state.set_status(|s| {
           s.loading = false;
           s.error = Some(format!(
-            "找不到 ASR 模型（Qwen3-ASR-0.6B-ONNX-CPU）。已尝试：\n{}",
+            "找不到 ASR 模型（ONNX：Qwen3-ASR-0.6B-ONNX-CPU[-tuned]，GGUF：Qwen3-ASR-1.7B-GGUF[-tuned]）。已尝试：\n{}",
             paths.tried.join("\n")
           ));
         });
         return;
       };
 
-      crate::log_line(&format!("加载 ASR 模型：{}", asr_dir.display()));
       state.set_status(|s| {
         s.loading = true;
         s.error = None;
       });
-      match AsrPipeline::load(&asr_dir, threads) {
-        Ok(p) => {
-          *state.asr.lock().unwrap() = Some(p);
-          crate::log_line("ASR 模型就绪");
-          state.set_status(|s| {
-            s.asr_ready = true;
-            s.loading = false;
-          });
-        }
-        Err(e) => {
-          crate::log_line(&format!("ASR 加载失败：{e}"));
-          state.set_status(|s| {
-            s.loading = false;
-            s.error = Some(format!("ASR 模型加载失败：{e}"));
-          });
-          return;
+
+      // 按所选后端加载；显式选择的后端失败时回退另一个可用后端（日志说明）
+      let mut loaded: Option<(Backend, AsrEngine, String)> = None;
+      let mut order = vec![backend];
+      let other = if backend == Backend::Gguf { Backend::Onnx } else { Backend::Gguf };
+      order.push(other);
+      let mut last_err = String::new();
+      for b in order {
+        match b {
+          Backend::Gguf => {
+            let Some(g) = paths.gguf.clone() else { continue };
+            crate::log_line(&format!("加载 GGUF ASR：{} + {}", g.lm.display(), g.mmproj.display()));
+            match GgufAsr::load(&g.lm, &g.mmproj, threads, 512) {
+              Ok(p) => {
+                let dir = g.lm.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                loaded = Some((Backend::Gguf, AsrEngine::Gguf(p), dir));
+                break;
+              }
+              Err(e) => {
+                last_err = e;
+                crate::log_line(&format!("GGUF ASR 加载失败：{last_err}"));
+              }
+            }
+          }
+          Backend::Onnx => {
+            let Some(dir) = paths.asr.clone() else { continue };
+            crate::log_line(&format!("加载 ONNX ASR：{}", dir.display()));
+            match AsrPipeline::load(&dir, threads) {
+              Ok(p) => {
+                loaded = Some((Backend::Onnx, AsrEngine::Onnx(p), dir.display().to_string()));
+                break;
+              }
+              Err(e) => {
+                last_err = e;
+                crate::log_line(&format!("ONNX ASR 加载失败：{last_err}"));
+              }
+            }
+          }
         }
       }
+
+      let Some((active, engine, dir)) = loaded else {
+        state.set_status(|s| {
+          s.loading = false;
+          s.error = Some(format!("ASR 模型加载失败：{last_err}"));
+        });
+        return;
+      };
+      *state.asr.lock().unwrap() = Some(engine);
+      let tuned = models::tuned_for(active, &paths);
+      crate::log_line(&format!(
+        "ASR 模型就绪（后端 {}，{}）",
+        match active { Backend::Gguf => "gguf/llama.cpp", Backend::Onnx => "onnx/ort" },
+        if tuned { "微调包：提示词可控输出风格" } else { "基座包" }
+      ));
+      if !tuned && !cfg.style_context().is_empty() {
+        crate::log_line(
+          "提示：当前为基座模型包（缺 shuo-model.json），提示词只作识别偏置，\
+           不会控制输出风格；选「逐字转写」可完全消除偏置。微调模型包可在 设置 → 模型与引擎 一键下载",
+        );
+      }
+      state.set_status(|s| {
+        s.asr_ready = true;
+        s.loading = false;
+        s.style_model = tuned;
+        s.asr_dir = Some(dir);
+        s.asr_backend = match active { Backend::Gguf => "gguf".into(), Backend::Onnx => "onnx".into() };
+      });
 
       // 降噪模型（可选）
       if let Some(path) = crate::denoise_path(&state.app) {
@@ -287,60 +379,6 @@ fn spawn_loader(state: Arc<AppState>) {
             state.set_status(|s| s.denoise_ready = true);
           }
           Err(e) => crate::log_line(&format!("降噪模型加载失败：{e}")),
-        }
-      }
-
-      if cfg.llm_enabled {
-        if let Some(dir) = paths.llm.clone() {
-          state.set_status(|s| s.llm_loading = true);
-          match LlmPipeline::load(&dir, threads) {
-            Ok(p) => {
-              *state.llm.lock().unwrap() = Some(p);
-              crate::log_line("LLM 模型就绪");
-              state.set_status(|s| {
-                s.llm_ready = true;
-                s.llm_loading = false;
-              });
-            }
-            Err(e) => {
-              crate::log_line(&format!("LLM 加载失败：{e}"));
-              state.set_status(|s| {
-                s.llm_loading = false;
-                s.error = Some(format!("LLM 模型加载失败：{e}"));
-              });
-            }
-          }
-        }
-      }
-    })
-    .ok();
-}
-
-fn spawn_llm_loader(state: Arc<AppState>) {
-  std::thread::Builder::new()
-    .name("shuo-llm-loader".into())
-    .spawn(move || {
-      if state.llm.lock().unwrap().is_some() {
-        return;
-      }
-      let paths = state.paths.lock().unwrap().clone();
-      let Some(dir) = paths.llm else { return };
-      state.set_status(|s| s.llm_loading = true);
-      match LlmPipeline::load(&dir, crate::threads()) {
-        Ok(p) => {
-          *state.llm.lock().unwrap() = Some(p);
-          crate::log_line("LLM 模型就绪");
-          state.set_status(|s| {
-            s.llm_ready = true;
-            s.llm_loading = false;
-          });
-        }
-        Err(e) => {
-          crate::log_line(&format!("LLM 加载失败：{e}"));
-          state.set_status(|s| {
-            s.llm_loading = false;
-            s.error = Some(format!("LLM 模型加载失败：{e}"));
-          });
         }
       }
     })
@@ -359,7 +397,7 @@ fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
         let paste_mode = job.paste_mode;
         let result = transcribe(&state, &cfg, job);
         match result {
-          Ok((asr, llm_text, llm_s)) => {
+          Ok(asr) => {
             crate::set_busy(&state.app, None);
             let _ = state.app.emit(
               "asr",
@@ -372,13 +410,12 @@ fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
                 "chunks": asr.chunks,
               }),
             );
-            let final_text = llm_text.clone().unwrap_or_else(|| asr.text.clone());
             if cfg.save_history {
-              crate::config::add_history(&asr.text, llm_text.as_deref());
+              crate::config::add_history(&asr.text);
               let mut h = state.history.lock().unwrap();
               h.push(crate::config::HistoryItem {
                 asr_text: asr.text.clone(),
-                llm_text: llm_text.clone(),
+                llm_text: None,
                 time: crate::config::chrono_time(),
               });
               // 与历史文件一致：内存里也最多留 500 条，避免长跑无限增长
@@ -387,14 +424,14 @@ fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
                 h.drain(..cut);
               }
             }
-            let final_text = finalize_text(&state, &cfg, &final_text);
+            let final_text = finalize_text(&state, &cfg, &asr.text);
+            let style_model = state.status.lock().unwrap().style_model;
             let _ = state.app.emit(
               "final",
               serde_json::json!({
                 "id": id,
                 "asr_text": asr.text,
-                "llm_text": llm_text,
-                "llm_s": llm_s,
+                "style_model": style_model,
                 "text": final_text,
                 "time": crate::config::chrono_time(),
               }),
@@ -421,7 +458,7 @@ fn transcribe(
   state: &Arc<AppState>,
   cfg: &Config,
   job: Job,
-) -> Result<(crate::asr::AsrResult, Option<String>, f64), String> {
+) -> Result<crate::asr::AsrResult, String> {
   let mut samples = job.samples;
   if job.rate != 16000 {
     samples = crate::dsp::resample(&samples, job.rate, 16000)?;
@@ -444,64 +481,17 @@ fn transcribe(
     Some(lang_owned.as_str())
   };
 
-  let asr_result = {
-    let mut guard = state.asr.lock().unwrap();
-    let pipeline = guard.as_mut().ok_or("ASR 模型尚未加载完成")?;
-    if cfg.denoise {
-      pipeline.transcribe_single(&samples, language, 512)?
-    } else {
-      pipeline.transcribe(&samples, language, 512, 30)?
-    }
-  };
+  // 输出风格：用户提示词进 chat 模板 system 段（context 通道），识别即按风格输出。
+  // `verbatim` 预设 = 空 context = 原生逐字转写。基座包（无 shuo-model.json）上
+  // 提示词只作识别偏置，功能不炸（日志已在加载时提示一次）。
+  let context = cfg.style_context();
 
-  if !cfg.llm_enabled || asr_result.text.trim().is_empty() {
-    return Ok((asr_result, None, 0.0));
-  }
-
-  // LLM 未加载则按需加载
-  if state.llm.lock().unwrap().is_none() {
-    let paths = state.paths.lock().unwrap().clone();
-    if let Some(dir) = paths.llm {
-      state.set_status(|s| s.llm_loading = true);
-      match LlmPipeline::load(&dir, crate::threads()) {
-        Ok(p) => {
-          *state.llm.lock().unwrap() = Some(p);
-          state.set_status(|s| {
-            s.llm_ready = true;
-            s.llm_loading = false;
-          });
-        }
-        Err(e) => {
-          state.set_status(|s| s.llm_loading = false);
-          return Ok((asr_result, None, 0.0));
-        }
-      }
-    }
-  }
-
-  let system = if cfg.llm_preset == "custom" {
-    cfg.llm_system_prompt.clone()
+  let mut guard = state.asr.lock().unwrap();
+  let pipeline = guard.as_mut().ok_or("ASR 模型尚未加载完成")?;
+  if cfg.denoise {
+    pipeline.transcribe_single(&samples, language, &context, 512)
   } else {
-    preset_prompt(&cfg.llm_preset)
-      .map(|s| s.to_string())
-      .unwrap_or_else(|| preset_prompt(crate::llm::PRESET_STANDARD).unwrap().to_string())
-  };
-
-  let t0 = std::time::Instant::now();
-  let mut guard = state.llm.lock().unwrap();
-  let Some(pipeline) = guard.as_mut() else {
-    return Ok((asr_result, None, 0.0));
-  };
-  match pipeline.generate(&system, &asr_result.text, Sampling::default()) {
-    Ok(text) if !text.trim().is_empty() => {
-      let llm_s = t0.elapsed().as_secs_f64();
-      Ok((asr_result, Some(text.trim().to_string()), llm_s))
-    }
-    Ok(_) => Ok((asr_result, None, t0.elapsed().as_secs_f64())),
-    Err(e) => {
-      crate::log_line(&format!("LLM 推理失败：{e}"));
-      Ok((asr_result, None, t0.elapsed().as_secs_f64()))
-    }
+    pipeline.transcribe(&samples, language, &context, 512, 30)
   }
 }
 

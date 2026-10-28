@@ -1,5 +1,26 @@
 # Changelog
 
+## 未发布 — 提示词控制输出风格的 ASR 应用（llama.cpp/GGUF · Qwen3-ASR-1.7B）
+
+### 新增 — 输出风格：提示词控制转写文本风格
+- 微调 Qwen3-ASR-1.7B 为「微调模型包」：用户提示词进 chat 模板 system 段（context 通道），模型直接输出目标风格文本；风格预设：逐字转写 / 中文书面化 / 英文书面化 / 中文（翻译）/ 英文（翻译）/ 简略（压缩要点）/ 详细（保留全部细节）/ 自定义提示词
+- 基座包不执行指令（官方防指令注入设计），微调模型包（目录带 `shuo-model.json` 标记：基座 / 适配器 / 提示词集记录）才兑现风格开关；基座上运行不报错，提示词退化为识别偏置
+- 本仓库是「调用模型的应用程序」：微调产线不在仓库内，模型包以 GitHub Release 资产分发
+- **模型一键下载**（`src/model_download.rs`）：缺模型时横幅与设置页一键从 Release 拉取微调模型包（约 1.4 GB）到 `~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`；断点续传（.part + Range）、大小校验、400ms 节流进度事件、完成后自动重载引擎；TLS 证书走**系统信任库**（ureq `platform-verifier`），代理环境的拦截证书装进系统即可下载；下载源 = 文件顶部 `RELEASE_REPO`/`RELEASE_TAG` 两个常量（当前指向贡献者 fork 的 pre-release，上游换成自己的 Release 即可）
+
+### 变更 — ASR 推理框架迁移到 llama.cpp/GGUF（换用 Qwen3-ASR-1.7B）
+- 新后端 `src/gguf_asr.rs`：llama-cpp-sys-2（=0.1.157，openmp+mtmd）**源码静态链接**进可执行文件（无 DLL/so 伴生），mtmd 音频 tokenize/prefill + 贪心解码 + `language X<asr_text>` 解析；与 ONNX 路径同接口（AsrResult），长音频复用静音切分
+- 双后端调度：`asr_backend` 配置（auto/onnx/gguf；auto = 有 GGUF 模型优先 GGUF）；所选后端加载失败自动回退另一个（日志说明）；`Status.asr_backend` 上报，UI chip 显示当前后端
+- ort 继续承担降噪模型（resources/denoise.onnx）与 ONNX ASR 后备后端（Daumee 0.6B 包）
+- 打包：deb depends 增加 `libgomp1`（OpenMP）；ci/release 工作流补 libclang 准备（bindgen）；Windows 运行期依赖 VC++ 2015-2022 运行库（vcomp140）
+
+### 移除 — 双模型工作流 / PySide legacy 前端 / 微调产线
+- **独立 LLM 后处理段（Qwen3.5-2B ONNX）整体移除**：`src/llm.rs`（583 行）及全部关联（`mod llm`、加载器、worker LLM 段、5 个命令、`half` 依赖、LLM 模型槽位、UI 设置组/chip/提示词库）；「逐字转写」预设即旧的不优化行为；旧配置字段名经 serde alias 承接、废弃字段经 `extra` flatten 原样保留，history.json 的 `llm_text` 仅兼容展示
+- **结果区双卡合一**：「识别原文 / 整理结果」合并为单张「识别结果」卡（语言徽章 + 生效风格徽章 + 复制按钮）——单模型路径下 ASR 输出即最终文本，双卡恒同文
+- **`legacy/2026-10-25-python/`（PySide6 原版）与 `i18n/`（Python 翻译工具）移除**：应用单一实现（Tauri 3），UI 多语言源 = `ui/locales/*.json`（27 语言，新键先进 app.js 的 EXTRA zh/en）
+- **`finetune/` 微调产线与 `finetune.yml` 工作流移出仓库**：产线代码与全部实测记录保留在贡献分支 `feat/gguf-1.7b` 历史中，模型维护者可取用
+- CI：`py-ui` job 精简为纯 `ui` job（node 语法 + locales JSON 解析 + 控件存在性 + **防回归断言**：LLM 控件/命令/模块、finetune/legacy/i18n 目录、旧话术与双卡片必须缺席）；rust 双腿新增 **测试构建 artifact**（`test-build-windows` / `test-build-linux`：`cargo build --release` 直出 + denoise.onnx + 使用说明，保留 14 天），实机测试不必等 release.yml 全量打包
+
 ## 26.10.25 — 2026-10-25
 
 > 版本号自本版起改为日期 `YY.MM.DD`，tag 为 `v26.10.25`；同日多次发版自动加 `-2`、`-3`。

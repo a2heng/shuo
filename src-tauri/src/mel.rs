@@ -244,6 +244,8 @@ mod tests {
     for v in f {
       bytes.extend_from_slice(&v.to_le_bytes());
     }
+    // 调试转储目录 CI 上不存在，先建再写（Windows 落到当前盘 \tmp\opencode）
+    std::fs::create_dir_all("/tmp/opencode").unwrap();
     std::fs::write("/tmp/opencode/mel_filters_rs.f32", &bytes).unwrap();
   }
 }
