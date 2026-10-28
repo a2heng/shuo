@@ -37,8 +37,8 @@ if (-not $SkipInstall) {
 }
 
 # 降噪模型直接来自仓库，打包时会被复制到资源目录
-if (-not (Test-Path "onnx_infer\denoise.onnx")) {
-  throw "缺少 onnx_infer\denoise.onnx（仓库自带，检查是否被误删）"
+if (-not (Test-Path "src-tauri\resources\denoise.onnx")) {
+  throw "缺少 src-tauri\resources\denoise.onnx（仓库自带，检查是否被误删）"
 }
 
 if ($Debug) {

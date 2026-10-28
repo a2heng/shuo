@@ -5,13 +5,35 @@
 ### 新增 — 输出风格：提示词控制转写文本风格
 - 微调 Qwen3-ASR-1.7B 为「微调模型包」：用户提示词进 chat 模板 system 段（context 通道），模型直接输出目标风格文本；风格预设：逐字转写 / 中文书面化 / 英文书面化 / 中文（翻译）/ 英文（翻译）/ 简略（压缩要点）/ 详细（保留全部细节）/ 自定义提示词
 - 基座包不执行指令（官方防指令注入设计），微调模型包（目录带 `shuo-model.json` 标记：基座 / 适配器 / 提示词集记录）才兑现风格开关；基座上运行不报错，提示词退化为识别偏置
-- 本仓库是「调用模型的应用程序」：微调产线不在仓库内，模型包以 GitHub Release 资产分发
-- **模型一键下载**（`src/model_download.rs`）：缺模型时横幅与设置页一键从 Release 拉取微调模型包（约 1.4 GB）到 `~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`；断点续传（.part + Range）、大小校验、400ms 节流进度事件、完成后自动重载引擎；TLS 证书走**系统信任库**（ureq `platform-verifier`），代理环境的拦截证书装进系统即可下载；下载源 = 文件顶部 `RELEASE_REPO`/`RELEASE_TAG` 两个常量（当前指向贡献者 fork 的 pre-release，上游换成自己的 Release 即可）
+- 本仓库是「调用模型的应用程序」：微调产线不在仓库内，模型包托管在 ModelScope（作者 OrientCOMPASS，本仓库只分发）
+- **模型一键下载**（`src/model_download.rs`）：缺模型时横幅与设置页一键从 ModelScope 拉取微调模型包（约 1.4 GB）到 `~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`；断点续传（.part + Range）、大小 + SHA256 校验、400ms 节流进度事件、完成后自动重载引擎；TLS 证书走**系统信任库**（ureq `platform-verifier`），代理环境的拦截证书装进系统即可下载；下载源 = 文件顶部 `REPO`/`REVISION` 两个常量（`a2heng/shuo-asr-1.7b-gguf`，可用 `SHUO_MODEL_ENDPOINT` 指向镜像）
+
+### 变更 — 模型分发从 GitHub Release 迁到 ModelScope（上传直连、下载更快）
+- 微调模型包改托管在 ModelScope 公开模型仓库 [`a2heng/shuo-asr-1.7b-gguf`](https://modelscope.cn/models/a2heng/shuo-asr-1.7b-gguf)，应用内一键下载改为读 ModelScope `repo/files` 清单（Size + Sha256）再走 `resolve` 直链；`RELEASE_REPO`/`RELEASE_TAG` → `REPO`/`REVISION`，新增 `SHUO_MODEL_ENDPOINT` 可指向自建镜像
+- 下载完成增加 **SHA256 校验**（清单里的 `Sha256`，`sha2` 已在依赖图中）；本地已存在文件大小一致但哈希不符时会删除重下
+- 实测（本机，2026-10-28）：ModelScope 直连单连接 ≈9.8 MB/s、上传 ≈6 MB/s；GitHub Release 直连 ≈30 KB/s；HuggingFace 直连超时（走代理 ≈0.4 MB/s），`hf-mirror.com` **只读、不能上传**（登录/写接口 404）
+- **模型作者是 [OrientCOMPASS](https://github.com/OrientCOMPASS)**（PR #1：数据 / LoRA 训练 / GGUF 量化）；a2heng 与主仓库只做托管分发，README / NOTICE / 模型卡均已写明；贡献者 fork 的 `OrientCOMPASS/shuo` pre-release `model-tuned-1.7B-pre` 仅作过渡，应用不再引用
+
+### 性能 — 推理提速（本机 10.4 s 音频 21 s → 2.2 s）
+- **线程数改物理核心**：原来 `available_parallelism()` 取逻辑线程（6C/12T → 12），llama.cpp 在超线程上严重过载；改 `num_cpus::get_physical()` 后 6 线程（实测 6 线程 2.4 s / 10 线程 4.8 s / 12 线程 19–40 s）；`SHUO_ASR_THREADS` / `SHUO_MTMD_THREADS` 可覆盖
+- **mtmd 音频编码线程数跟随**（llama.cpp 默认固定 4），`use_gpu=false`、`print_timings` 跟随 `SHUO_LLAMA_LOG`
+- **降噪链路少一次重采样**：按设备实际采样率直接 → 48 kHz → 降噪 → 16 kHz（旧实现先降到 16k 再升回 48k）；抽出 `normalize_audio()`，单测覆盖 16k/22.05k/32k/44.1k/48k/96k（含降噪）
+- 每次识别写耗时日志：`识别完成：音频 x s，降噪 y s，ASR z s，总 t s（RTF …）`
+- 新增基准：`gguf_transcribe_bench`（加载/3 次转写，打印 RTF 与 token 数）、`denoise_bench`
+
+### 移除 — ONNX ASR 后端（ort 只保留降噪）
+- 删除 ONNX ASR 管线（`asr.rs` 的 `AsrPipeline`：mel → conv/transformer → decoder init/step）与 Daumee 0.6B ONNX 模型槽位；应用只剩 llama.cpp/GGUF 一条推理路径（CPU，静态链接）
+- `asr.rs` 保留为公共契约（`AsrResult` / 风格预设 / 测试 WAV 读取）；Qwen3 chat 模板的 token 级布局挪到 `cfg(test) mod prompt_contract` 作回归对照
+- `models.rs` 只剩 GGUF 槽位（`resolve()`/`describe()`）；删 `Backend` 枚举、`pick_backend()`、`tuned_for()`、`asr_ok()`
+- `state.rs` 的 `AsrEngine` 双后端枚举删除，槽位直接 `Mutex<Option<GgufAsr>>`；GGUF 加载失败直接报错（不再回退 0.6B）
+- 配置 `asr_backend`（auto/onnx/gguf）删除；旧值经 `extra` flatten 原样保留不丢。`Status.asr_backend` 恒 `"gguf"`（UI chip 用）
+- 依赖 `tokenizers` 移除（只被 ONNX 路径使用）；`ort` 仅服务 `denoise.onnx`；安装包因此不再需要 ONNX ASR 的 2.5 GB 可选模型
+- CI 增加防回归断言：`AsrPipeline` / `pick_backend` / `encoder_transformer.onnx` 不得再出现；Windows 打包脚本的降噪模型路径修正为 `src-tauri/resources/denoise.onnx`
 
 ### 变更 — ASR 推理框架迁移到 llama.cpp/GGUF（换用 Qwen3-ASR-1.7B）
 - 新后端 `src/gguf_asr.rs`：llama-cpp-sys-2（=0.1.157，openmp+mtmd）**源码静态链接**进可执行文件（无 DLL/so 伴生），mtmd 音频 tokenize/prefill + 贪心解码 + `language X<asr_text>` 解析；与 ONNX 路径同接口（AsrResult），长音频复用静音切分
 - 双后端调度：`asr_backend` 配置（auto/onnx/gguf；auto = 有 GGUF 模型优先 GGUF）；所选后端加载失败自动回退另一个（日志说明）；`Status.asr_backend` 上报，UI chip 显示当前后端
-- ort 继续承担降噪模型（resources/denoise.onnx）与 ONNX ASR 后备后端（Daumee 0.6B 包）
+- ort 继续承担降噪模型（resources/denoise.onnx）与 ONNX ASR 后备后端（Daumee 0.6B 包）——**后备后端随后已整体移除，见上方「移除 — ONNX ASR 后端」**
 - 打包：deb depends 增加 `libgomp1`（OpenMP）；ci/release 工作流补 libclang 准备（bindgen）；Windows 运行期依赖 VC++ 2015-2022 运行库（vcomp140）
 
 ### 移除 — 双模型工作流 / PySide legacy 前端 / 微调产线

@@ -42,13 +42,13 @@ const EXTRA = {
     "settings.engine": "Models & engine",
     "settings.interface": "Interface",
     "settings.model_download": "Model download",
-    "settings.model_download_hint": "One-click download of the fine-tuned model (~1.4 GB, Qwen3-ASR-1.7B GGUF) from the project's GitHub Release into ~/.shuo/models/. Resumable; the engine reloads automatically when done.",
+    "settings.model_download_hint": "One-click download of the fine-tuned model (~1.4 GB, Qwen3-ASR-1.7B GGUF) from the project's ModelScope repository into ~/.shuo/models/. Resumable (SHA256-checked); the engine reloads automatically when done.",
     "btn.download_model": "Download model",
     "btn.open_release": "Source page",
     "toast.dl_started": "Download started — progress under Settings → Models & engine",
     "toast.dl_done": "Model ready",
     "toast.dl_error": "Download failed",
-    "dl.preparing": "Fetching release metadata…",
+    "dl.preparing": "Fetching model repository metadata…",
     "rec.capturing": "Press a new hotkey (mouse/keyboard)…",
     "toast.copied": "Copied",
     "toast.saved": "Saved",
@@ -66,7 +66,7 @@ const EXTRA = {
     "confirm.clear": "Clear all history? This cannot be undone.",
     "banner.hotkey": "Global hotkey unavailable",
     "about.version": "Version",
-    "about.engine": "ASR: Qwen3-ASR (GGUF 1.7B / ONNX 0.6B) — transcription with prompt-controlled output style",
+    "about.engine": "ASR: Qwen3-ASR-1.7B (GGUF, llama.cpp CPU) — transcription with prompt-controlled output style",
     "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + llama.cpp/ort",
   },
   zh: {
@@ -93,13 +93,13 @@ const EXTRA = {
     "settings.engine": "模型与引擎",
     "settings.interface": "界面",
     "settings.model_download": "模型下载",
-    "settings.model_download_hint": "一键从项目 GitHub Release 下载微调模型包（约 1.4 GB，Qwen3-ASR-1.7B GGUF）到 ~/.shuo/models/，支持断点续传，完成后自动重载引擎。",
+    "settings.model_download_hint": "一键从项目 ModelScope 模型仓库（a2heng/shuo-asr-1.7b-gguf）下载微调模型包（约 1.4 GB，Qwen3-ASR-1.7B GGUF）到 ~/.shuo/models/，支持断点续传 + SHA256 校验，完成后自动重载引擎。模型作者 OrientCOMPASS。",
     "btn.download_model": "下载模型",
     "btn.open_release": "来源页面",
     "toast.dl_started": "已开始下载——进度见 设置 → 模型与引擎",
     "toast.dl_done": "模型已就绪",
     "toast.dl_error": "下载失败",
-    "dl.preparing": "正在查询 Release 元数据…",
+    "dl.preparing": "正在查询模型仓库…",
     "rec.capturing": "请按下新的热键（鼠标/键盘）…",
     "toast.copied": "已复制",
     "toast.saved": "已保存",
@@ -117,7 +117,7 @@ const EXTRA = {
     "confirm.clear": "确定清空所有历史记录？此操作不可撤销。",
     "banner.hotkey": "全局热键不可用",
     "about.version": "版本",
-    "about.engine": "ASR：Qwen3-ASR（GGUF 1.7B / ONNX 0.6B）——提示词控制输出风格的语音转写",
+    "about.engine": "ASR：Qwen3-ASR-1.7B（GGUF，llama.cpp CPU）——提示词控制输出风格的语音转写",
     "about.license": "GPL-3.0-or-later · Tauri 3 · Rust + llama.cpp/ort",
   },
 };
@@ -637,7 +637,7 @@ function bindSettings() {
     if (e.key === "Escape" && !$("#drawer").hidden) close();
   });
 
-  // 一键下载微调模型包（GitHub Release → ~/.shuo/models/；进度走 model-download 事件）
+  // 一键下载微调模型包（ModelScope → ~/.shuo/models/；进度走 model-download 事件）
   const startDownload = async () => {
     try {
       await invoke("download_model");
@@ -648,7 +648,7 @@ function bindSettings() {
     }
   };
   $("#btn-download-model").addEventListener("click", startDownload);
-  $("#btn-open-release").addEventListener("click", () => invoke("open_release_page"));
+  $("#btn-open-release").addEventListener("click", () => invoke("open_model_page"));
   // 横幅快捷入口：启动下载并展开设置抽屉看进度
   $("#banner-download").addEventListener("click", async () => {
     await startDownload();

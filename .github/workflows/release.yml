@@ -225,5 +225,5 @@ jobs:
             gh release create "$TAG" out/* \
               --repo "$GITHUB_REPOSITORY" \
               --title "说 · Shuo ${VERSION}" \
-              --notes "Windows: NSIS 安装包；Linux: deb + AppImage。模型不随包分发，首次使用请把 Qwen3-ASR-0.6B-ONNX-CPU 与 Qwen3.5-2B-ONNX-OPT 放到仓库根目录或 ~/.shuo/models（详见 README）。"
+              --notes "Windows: NSIS 安装包；Linux: deb + AppImage。模型不随包分发：首次启动点「设置 → 模型与引擎 → 下载模型」从 ModelScope 拉取微调模型包（约 1.4 GB，模型作者 OrientCOMPASS），或用 SHUO_MODEL_ENDPOINT 指定镜像（详见 README）。"
           fi

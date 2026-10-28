@@ -11,48 +11,11 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::asr::AsrPipeline;
 use crate::audio::RecorderHandle;
 use crate::config::{Config, HistoryItem};
 use crate::denoise::Denoiser;
 use crate::gguf_asr::GgufAsr;
-use crate::models::{self, Backend, ModelPaths};
-
-/// ASR 推理引擎：ONNX（ort，Daumee 0.6B 包）或 GGUF（llama.cpp，1.7B）。
-/// 两条路径对外同接口（transcribe/transcribe_single → AsrResult），worker 无差别调度。
-pub enum AsrEngine {
-  Onnx(AsrPipeline),
-  Gguf(GgufAsr),
-}
-
-impl AsrEngine {
-  pub fn transcribe(
-    &mut self,
-    wav: &[f32],
-    language: Option<&str>,
-    context: &str,
-    max_new_tokens: usize,
-    chunk_sec: usize,
-  ) -> Result<crate::asr::AsrResult, String> {
-    match self {
-      AsrEngine::Onnx(p) => p.transcribe(wav, language, context, max_new_tokens, chunk_sec),
-      AsrEngine::Gguf(p) => p.transcribe(wav, language, context, max_new_tokens, chunk_sec),
-    }
-  }
-
-  pub fn transcribe_single(
-    &mut self,
-    wav: &[f32],
-    language: Option<&str>,
-    context: &str,
-    max_new_tokens: usize,
-  ) -> Result<crate::asr::AsrResult, String> {
-    match self {
-      AsrEngine::Onnx(p) => p.transcribe_single(wav, language, context, max_new_tokens),
-      AsrEngine::Gguf(p) => p.transcribe_single(wav, language, context, max_new_tokens),
-    }
-  }
-}
+use crate::models::{self, ModelPaths};
 
 pub struct Job {
   pub samples: Vec<f32>,
@@ -70,7 +33,7 @@ pub struct Status {
   pub denoise_ready: bool,
   /// 当前模型包是否为微调包（system 段提示词可当任务指令，控制输出风格）
   pub style_model: bool,
-  /// 当前 ASR 推理后端："onnx" / "gguf" / ""（未加载）
+  /// ASR 推理后端（唯一实现：llama.cpp/GGUF；保留字段给 UI chip）
   pub asr_backend: String,
 }
 
@@ -131,7 +94,7 @@ pub struct AppState {
   pub app: AppHandle,
   pub cfg: Mutex<Config>,
   pub paths: Mutex<ModelPaths>,
-  pub asr: Mutex<Option<AsrEngine>>,
+  pub asr: Mutex<Option<GgufAsr>>,
   pub denoiser: Mutex<Option<Denoiser>>,
   pub status: Mutex<Status>,
   pub recorder: Mutex<Option<RecorderHandle>>,
@@ -148,10 +111,14 @@ impl AppState {
     let status = Status {
       loading: true,
       asr_ready: false,
-      asr_dir: paths.asr.as_ref().map(|p| p.display().to_string()),
+      asr_dir: paths
+        .gguf
+        .as_ref()
+        .and_then(|g| g.lm.parent())
+        .map(|d| d.display().to_string()),
       error: None,
       denoise_ready: false,
-      style_model: paths.asr_tuned,
+      style_model: paths.gguf_tuned,
       asr_backend: String::new(),
     };
     let state = Arc::new(Self {
@@ -201,10 +168,13 @@ impl AppState {
       let mut p = self.paths.lock().unwrap();
       *p = paths.clone();
     }
-    let cur_backend = self.status.lock().unwrap().asr_backend.clone();
     self.set_status(|s| {
-      s.asr_dir = paths.asr.as_ref().map(|p| p.display().to_string());
-      s.style_model = if cur_backend == "gguf" { paths.gguf_tuned } else { paths.asr_tuned };
+      s.asr_dir = paths
+        .gguf
+        .as_ref()
+        .and_then(|g| g.lm.parent())
+        .map(|d| d.display().to_string());
+      s.style_model = paths.gguf_tuned;
     });
   }
 
@@ -285,12 +255,13 @@ fn spawn_loader(state: Arc<AppState>) {
       let paths = state.paths.lock().unwrap().clone();
       let threads = crate::threads();
 
-      let backend = models::pick_backend(&cfg, &paths);
-      let Some(backend) = backend else {
+      // 唯一推理路径：llama.cpp/GGUF（ONNX ASR 后端已移除）
+      let Some(g) = paths.gguf.clone() else {
         state.set_status(|s| {
           s.loading = false;
           s.error = Some(format!(
-            "找不到 ASR 模型（ONNX：Qwen3-ASR-0.6B-ONNX-CPU[-tuned]，GGUF：Qwen3-ASR-1.7B-GGUF[-tuned]）。已尝试：\n{}",
+            "找不到 GGUF ASR 模型（Qwen3-ASR-1.7B-GGUF-tuned/ 或 Qwen3-ASR-1.7B-GGUF/）。\
+             可在 设置 → 模型与引擎 一键下载。已尝试：\n{}",
             paths.tried.join("\n")
           ));
         });
@@ -302,58 +273,24 @@ fn spawn_loader(state: Arc<AppState>) {
         s.error = None;
       });
 
-      // 按所选后端加载；显式选择的后端失败时回退另一个可用后端（日志说明）
-      let mut loaded: Option<(Backend, AsrEngine, String)> = None;
-      let mut order = vec![backend];
-      let other = if backend == Backend::Gguf { Backend::Onnx } else { Backend::Gguf };
-      order.push(other);
-      let mut last_err = String::new();
-      for b in order {
-        match b {
-          Backend::Gguf => {
-            let Some(g) = paths.gguf.clone() else { continue };
-            crate::log_line(&format!("加载 GGUF ASR：{} + {}", g.lm.display(), g.mmproj.display()));
-            match GgufAsr::load(&g.lm, &g.mmproj, threads, 512) {
-              Ok(p) => {
-                let dir = g.lm.parent().map(|d| d.display().to_string()).unwrap_or_default();
-                loaded = Some((Backend::Gguf, AsrEngine::Gguf(p), dir));
-                break;
-              }
-              Err(e) => {
-                last_err = e;
-                crate::log_line(&format!("GGUF ASR 加载失败：{last_err}"));
-              }
-            }
-          }
-          Backend::Onnx => {
-            let Some(dir) = paths.asr.clone() else { continue };
-            crate::log_line(&format!("加载 ONNX ASR：{}", dir.display()));
-            match AsrPipeline::load(&dir, threads) {
-              Ok(p) => {
-                loaded = Some((Backend::Onnx, AsrEngine::Onnx(p), dir.display().to_string()));
-                break;
-              }
-              Err(e) => {
-                last_err = e;
-                crate::log_line(&format!("ONNX ASR 加载失败：{last_err}"));
-              }
-            }
-          }
+      crate::log_line(&format!("加载 GGUF ASR：{} + {}", g.lm.display(), g.mmproj.display()));
+      let engine = match GgufAsr::load(&g.lm, &g.mmproj, threads, 512) {
+        Ok(p) => p,
+        Err(e) => {
+          crate::log_line(&format!("GGUF ASR 加载失败：{e}"));
+          state.set_status(|s| {
+            s.loading = false;
+            s.error = Some(format!("ASR 模型加载失败：{e}"));
+          });
+          return;
         }
-      }
-
-      let Some((active, engine, dir)) = loaded else {
-        state.set_status(|s| {
-          s.loading = false;
-          s.error = Some(format!("ASR 模型加载失败：{last_err}"));
-        });
-        return;
       };
+
       *state.asr.lock().unwrap() = Some(engine);
-      let tuned = models::tuned_for(active, &paths);
+      let tuned = paths.gguf_tuned;
+      let dir = g.lm.parent().map(|d| d.display().to_string()).unwrap_or_default();
       crate::log_line(&format!(
-        "ASR 模型就绪（后端 {}，{}）",
-        match active { Backend::Gguf => "gguf/llama.cpp", Backend::Onnx => "onnx/ort" },
+        "ASR 模型就绪（后端 gguf/llama.cpp，{}）",
         if tuned { "微调包：提示词可控输出风格" } else { "基座包" }
       ));
       if !tuned && !cfg.style_context().is_empty() {
@@ -367,7 +304,7 @@ fn spawn_loader(state: Arc<AppState>) {
         s.loading = false;
         s.style_model = tuned;
         s.asr_dir = Some(dir);
-        s.asr_backend = match active { Backend::Gguf => "gguf".into(), Backend::Onnx => "onnx".into() };
+        s.asr_backend = "gguf".into();
       });
 
       // 降噪模型（可选）
@@ -454,25 +391,47 @@ fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
     .ok();
 }
 
+/// 采样率归一化（+ 可选降噪）：**任意设备采样率** → 16 kHz。
+///
+/// 降噪模型固定 48 kHz，所以先把「设备实际采样率」（16k / 44.1k / 48k / 96k …）
+/// 直接重采样到 48 kHz 再降噪，最后降回 16 kHz——不是假设输入就是 48k。
+/// 不降噪时只做一次 `rate → 16000`。单测覆盖 16k/44.1k/48k/96k。
+fn normalize_audio(
+  samples: Vec<f32>,
+  rate: u32,
+  denoiser: Option<&mut crate::denoise::Denoiser>,
+) -> Result<Vec<f32>, String> {
+  let mut samples = samples;
+  let mut rate = rate;
+  if let Some(d) = denoiser {
+    let up = if rate != crate::denoise::SR as u32 {
+      crate::dsp::resample(&samples, rate, crate::denoise::SR as u32)?
+    } else {
+      samples
+    };
+    let den = d.denoise(&up)?;
+    samples = crate::dsp::resample(&den, crate::denoise::SR as u32, 16000)?;
+    rate = 16000;
+  }
+  if rate != 16000 {
+    samples = crate::dsp::resample(&samples, rate, 16000)?;
+  }
+  Ok(samples)
+}
+
 fn transcribe(
   state: &Arc<AppState>,
   cfg: &Config,
   job: Job,
 ) -> Result<crate::asr::AsrResult, String> {
-  let mut samples = job.samples;
-  if job.rate != 16000 {
-    samples = crate::dsp::resample(&samples, job.rate, 16000)?;
-  }
+  let t0 = std::time::Instant::now();
+  let audio_s = job.duration_s;
 
-  // 降噪路径：16k → 48k → 降噪 → 16k
-  if cfg.denoise {
-    let mut guard = state.denoiser.lock().unwrap();
-    if let Some(d) = guard.as_mut() {
-      let up = crate::dsp::resample(&samples, 16000, 48000)?;
-      let den = d.denoise(&up)?;
-      samples = crate::dsp::resample(&den, 48000, 16000)?;
-    }
-  }
+  let mut guard = state.denoiser.lock().unwrap();
+  let denoiser = if cfg.denoise { guard.as_mut() } else { None };
+  let t_norm = std::time::Instant::now();
+  let samples = normalize_audio(job.samples, job.rate, denoiser)?;
+  let denoise_s = t_norm.elapsed().as_secs_f64();
 
   let lang_owned = cfg.asr_lang.clone();
   let language = if lang_owned == "auto" || lang_owned.is_empty() {
@@ -488,11 +447,20 @@ fn transcribe(
 
   let mut guard = state.asr.lock().unwrap();
   let pipeline = guard.as_mut().ok_or("ASR 模型尚未加载完成")?;
-  if cfg.denoise {
+  let result = if cfg.denoise {
     pipeline.transcribe_single(&samples, language, &context, 512)
   } else {
     pipeline.transcribe(&samples, language, &context, 512, 30)
+  };
+  let total = t0.elapsed().as_secs_f64();
+  if let Ok(ref r) = result {
+    crate::log_line(&format!(
+      "识别完成：音频 {audio_s:.2}s，降噪 {denoise_s:.2}s，ASR {:.2}s，总 {total:.2}s（RTF {:.2}）",
+      r.asr_s,
+      total / audio_s.max(0.01)
+    ));
   }
+  result
 }
 
 fn finalize_text(_state: &Arc<AppState>, cfg: &Config, text: &str) -> String {
@@ -519,4 +487,51 @@ fn finalize_text(_state: &Arc<AppState>, cfg: &Config, text: &str) -> String {
     return out.trim().to_string();
   }
   text.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn tone(rate: u32, secs: f32) -> Vec<f32> {
+    let n = (rate as f32 * secs) as usize;
+    (0..n)
+      .map(|i| {
+        let t = i as f32 / rate as f32;
+        (t * 440.0 * std::f32::consts::TAU).sin() * 0.2
+      })
+      .collect()
+  }
+
+  /// 任意设备采样率都必须归一化到 16 kHz（16k/22.05k/32k/44.1k/48k/96k）。
+  #[test]
+  fn normalize_audio_any_input_rate() {
+    for rate in [16000u32, 22050, 32000, 44100, 48000, 96000] {
+      let out = normalize_audio(tone(rate, 1.0), rate, None).expect("resample");
+      let got = out.len() as i64;
+      assert!(
+        (got - 16000).abs() <= 400,
+        "输入 {rate} Hz → 输出 {got} 样本（期望 ≈16000）"
+      );
+    }
+  }
+
+  /// 带降噪：输入先按实际 rate 升/降到 48k，再降回 16k，长度仍应 ≈1 s。
+  #[test]
+  fn normalize_audio_with_denoiser_any_input_rate() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/denoise.onnx");
+    if !path.is_file() {
+      eprintln!("跳过：{} 不存在", path.display());
+      return;
+    }
+    for rate in [16000u32, 44100, 48000] {
+      let mut d = crate::denoise::Denoiser::load(&path).expect("load denoise");
+      let out = normalize_audio(tone(rate, 1.0), rate, Some(&mut d)).expect("denoise");
+      let got = out.len() as i64;
+      assert!(
+        (got - 16000).abs() <= 400,
+        "降噪：输入 {rate} Hz → {got} 样本（期望 ≈16000）"
+      );
+    }
+  }
 }

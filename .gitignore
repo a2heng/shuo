@@ -3,9 +3,13 @@ Qwen3-ASR-0.6B-ONNX-CPU
 Qwen3-ASR-0.6B-ONNX-CPU-tuned
 Qwen3-ASR-1.7B-GGUF
 Qwen3-ASR-1.7B-GGUF-tuned
+# 历史目录（ONNX ASR / 旧 LLM 后端已移除，应用不再读取）
+Qwen3.5-2B-ONNX-OPT
 models/
 *.gguf
 *.wav
+# 旧 Python i18n 工具生成的根 locales（已随 i18n/ 移除；UI 用 src-tauri/ui/locales）
+/locales/
 
 **/__pycache__/
 *.pyc

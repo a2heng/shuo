@@ -2,18 +2,15 @@
 # 说 · Shuo — 持续集成（push / PR 必跑，全绿才合并）
 #
 # 三个 job：
-#   rust-linux    WebKitGTK 等系统依赖 + cargo test --release（mel/llm/asr 单测；
-#                 模型类测试在 SHUO_ASR_DIR/仓库模型目录缺失时自动跳过——真实
-#                 模型 e2e 在 finetune.yml mode=ort-e2e 手动跑，不阻塞 push）
-#   rust-windows  cargo test --release（debug 下 esaxx C++ 依赖静态 CRT 混链炸 LNK2005；
-#                 release 两侧 /MD 一致，release.yml 已验证）
-#   py-ui         finetune/ 脚本语法与纯逻辑校验（不装 torch）：py_compile、
-#                 提示词对表（prompts.py ↔ asr.rs 逐字一致）、stub 优化器/静音
-#                 样本/对照表后端单测、ui/app.js 语法（node --check）、
-#                 locales JSON 可解析。
+#   rust-linux    WebKitGTK 等系统依赖 + cargo test --release（mel/GGUF 单测；
+#                 真实模型用例由 SHUO_GGUF_LM/SHUO_GGUF_MM/SHUO_GGUF_WAV 门控，
+#                 缺失自动跳过；ModelScope 联网用例需显式 --ignored）
+#   rust-windows  cargo test --release（release 两侧 /MD 一致，release.yml 已验证）
+#   ui            纯静态断言：ui/app.js 语法（node --check）、locales JSON 可解析、
+#                 控件存在性/缺失防回归。
 #
-# 打包发版在 release.yml（tag 触发）；微调/补丁/真实模型验证在 finetune.yml
-# （手动触发，push 不消耗 runner）。
+# 打包发版在 release.yml（tag 触发）；微调产线不在本仓库。
+# 下载源 = ModelScope 公开仓库（a2heng/shuo-asr-1.7b-gguf）；GitHub Release 只放安装包。
 # ============================================================================
 name: CI
 
@@ -243,12 +240,21 @@ jobs:
           ! grep -q 'set_llm_enabled' src-tauri/ui/app.js
           ! grep -rq 'LlmPipeline' src-tauri/src/
           test ! -f src-tauri/src/llm.rs
+          # ONNX ASR 后端已移除（2026-10-28）：ort 只服务降噪；不存在双后端选择
+          grep -q 'pub struct AsrResult' src-tauri/src/asr.rs
+          grep -q 'pub mod hound_lite' src-tauri/src/asr.rs
+          ! grep -rq 'AsrPipeline' src-tauri/src
+          ! grep -rq 'pick_backend' src-tauri/src
+          ! grep -rq 'encoder_transformer.onnx' src-tauri/src
           # PR 契约：本仓库是「调用模型的应用程序」——微调产线 / PySide legacy / Python i18n 工具必须不在
           test ! -d finetune
           test ! -d legacy
           test ! -d i18n
           test ! -f .github/workflows/finetune.yml
-          # 下载源做成常量（上游合并后改 RELEASE_REPO/RELEASE_TAG 即换成自己的 Release）
-          grep -q 'RELEASE_REPO' src-tauri/src/model_download.rs
-          grep -q 'RELEASE_TAG' src-tauri/src/model_download.rs
+          # 下载源做成常量（ModelScope 仓库；换源只改 REPO/REVISION，镜像走 SHUO_MODEL_ENDPOINT）
+          grep -q 'pub const REPO' src-tauri/src/model_download.rs
+          grep -q 'pub const REVISION' src-tauri/src/model_download.rs
+          grep -q 'SHUO_MODEL_ENDPOINT' src-tauri/src/model_download.rs
+          # 下载源不能再指回 GitHub Release API
+          ! grep -q 'api.github.com' src-tauri/src/model_download.rs
           echo "UI_OK"

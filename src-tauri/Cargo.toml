@@ -34,7 +34,7 @@ ort = { version = "=2.0.0-rc.13", default-features = false, features = [
 # **源码静态链接**进可执行文件（无 llama.dll / ggml*.so 伴生）；mtmd feature 提供
 # 多模态音频路径（bindgen 自动生成 mtmd_* 绑定，qsa 已验证 0.1.157 可用）。
 # 版本 "=" 精确锁定：crate 内嵌 llama.cpp 源码构建，ABI 与 mtmd 头文件强绑定，
-# 升级需同步回归 gguf-e2e。CPU 后端静态编入；ort 保留给降噪模型与 LLM 后处理段。
+# 升级需同步回归 gguf-e2e。CPU 后端静态编入；ort 只服务降噪模型（denoise.onnx）。
 # 构建依赖：cmake + C/C++ 编译器 + libclang（bindgen）；CI 各腿的准备步骤见 ci.yml。
 # ============================================================================
 llama-cpp-sys-2 = { version = "=0.1.157", default-features = false, features = [
@@ -45,16 +45,14 @@ llama-cpp-sys-2 = { version = "=0.1.157", default-features = false, features = [
 cpal = "0.18"
 # 重采样（录音设备原生采样率 → 16 kHz）
 rubato = "5"
-# 文本分词（Qwen tokenizer.json）
-tokenizers = { version = "0.22", default-features = false, features = [
-  "onig",
-  "progressbar",
-  "esaxx_fast",
-] }
-# 模型一键下载（GitHub Release API + 资产流式落盘；阻塞式 HTTP，跑在独立线程）。
+# 模型一键下载（ModelScope 仓库清单 + 资产流式落盘；阻塞式 HTTP，跑在独立线程）。
 # platform-verifier：TLS 证书走**系统信任库**（而非编译期烘焙的 webpki-roots），
 # 企业/本地代理做 TLS 拦截时，其 CA 只要装进操作系统即可正常下载。
 ureq = { version = "3", features = ["platform-verifier"] }
+# 下载后校验（ModelScope 文件清单里的 Sha256；sha2 已在依赖图中，无新增下载）
+sha2 = "0.10"
+# 物理核心数（推理线程数：超线程会让 llama.cpp 明显变慢）
+num_cpus = "1"
 # 梅尔频谱 / 降噪 STFT
 rustfft = "6"
 

@@ -1,3 +1,7 @@
+> **历史参考（2026-10-28）**：应用已移除 ONNX ASR 后端，只用 llama.cpp/GGUF
+> （Qwen3-ASR-1.7B 微调包），`ort` 仅保留降噪。本文件是当时 Daumee 0.6B ONNX
+> 模型页的留档，不再对应任何运行时代码。
+
 ## Qwen3-ASR-0.6B — Full ONNX CPU
 
 > **Run Qwen3-ASR on any CPU. No GPU. No PyTorch.**

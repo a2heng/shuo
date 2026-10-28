@@ -42,44 +42,72 @@ powershell -ExecutionPolicy Bypass -File src-tauri\build.ps1
 * 基座模型不执行 prompt 指令（官方防指令注入设计），**必须配合微调模型包**
   （目录带 `shuo-model.json` 标记）才能兑现风格开关；基座包上运行不报错，
   提示词退化为识别偏置（选「逐字转写」预设可完全消除偏置）；
-* 微调模型包通过 GitHub Release 分发，应用内**一键下载**（见下）。
+* 微调模型包托管在 ModelScope（作者 OrientCOMPASS），应用内**一键下载**（见下）。
 
 > 本仓库是「调用模型的应用程序」：微调产线（数据 / LoRA 训练 / 评测 / GGUF 打包）
-> 不在本仓库内，模型包以 Release 资产形式发布。
+> 不在本仓库内，模型包托管在 ModelScope 模型仓库（`a2heng/shuo-asr-1.7b-gguf`）。
 
 ## 获取模型 / Get the Model
 
 首次启动缺模型时，横幅与「设置 → 模型与引擎」都有**下载模型**按钮：
-从项目 GitHub Release 拉取微调模型包（约 1.4 GB）到
-`~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`，支持断点续传，完成后自动重载引擎。
-下载走 HTTPS，证书校验使用**操作系统信任库**（企业/本地代理的 TLS 拦截证书
-装进系统后即可正常下载）。
+从 ModelScope 模型仓库拉取微调模型包（约 1.4 GB）到
+`~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`，支持断点续传、大小 + SHA256 校验，
+完成后自动重载引擎。下载走 HTTPS，证书校验使用**操作系统信任库**
+（企业/本地代理的 TLS 拦截证书装进系统后即可正常下载）。
 
-> **下载源**：当前指向 `OrientCOMPASS/shuo` 的 pre-release `model-tuned-1.7B-pre`
-> （`src-tauri/src/model_download.rs` 顶部两个常量，上游可自行改到自己的 Release）。
+> **下载源**：ModelScope 公开模型仓库 [`a2heng/shuo-asr-1.7b-gguf`](https://modelscope.cn/models/a2heng/shuo-asr-1.7b-gguf)
+> （国内直连即可，无需登录；`src/model_download.rs` 顶部 `REPO`/`REVISION` 两个常量，
+> 可用 `SHUO_MODEL_ENDPOINT` 覆盖域名指向自建镜像）。
+>
+> **模型作者是 [OrientCOMPASS](https://github.com/OrientCOMPASS)**（PR #1 贡献者，
+> 数据 / LoRA 训练 / GGUF 量化），本仓库与 a2heng 只负责托管分发，**不是模型作者**。
+> 之前贡献者 fork 的 GitHub pre-release 只作过渡，现已改为 ModelScope。
 
 也可手动放置模型（查找顺序：配置项 `asr_model_dir` → `SHUO_MODEL_DIR` →
 `~/.shuo/models/` → 可执行文件上溯 → 仓库目录）：
 
-| 后端 | 模型目录 | 说明 |
-|---|---|---|
-| `gguf`（优先） | `Qwen3-ASR-1.7B-GGUF-tuned/`（微调模型包，一键下载即是它）或 `Qwen3-ASR-1.7B-GGUF/`（官方 ggml-org 包，≈2.4 GB） | 目录内 `mmproj` 前缀 `.gguf` = 音频编码器，其余最大 `.gguf` = LM |
-| `onnx`（后备） | `Qwen3-ASR-0.6B-ONNX-CPU[-tuned]/` | Daumee 包（`hf download Daumee/Qwen3-ASR-0.6B-ONNX-CPU`）；ort 另承担降噪模型 |
+| 模型目录 | 说明 |
+|---|---|
+| `Qwen3-ASR-1.7B-GGUF-tuned/`（微调模型包，一键下载即是它）或 `Qwen3-ASR-1.7B-GGUF/`（官方 ggml-org 包，≈2.4 GB） | 目录内 `mmproj` 前缀 `.gguf` = 音频编码器，其余最大 `.gguf` = LM |
 
-配置 `asr_backend`：`auto`（默认，有 GGUF 模型优先 GGUF）/ `onnx` / `gguf`；
-所选后端模型缺失时自动回退另一个可用后端（日志说明）。UI 状态 chip 显示当前后端。
+推理**只有一条路径**：llama.cpp/GGUF（CPU，静态链接，无需 GPU）。
+ONNX Runtime 只承担**降噪**（内置 `resources/denoise.onnx`，随安装包分发）；
+ONNX ASR 后备后端（Daumee 0.6B 包，约 2.5 GB）已于 2026-10-28 移除。
+
+## 性能 / Performance
+
+纯 CPU 推理（无 GPU）。参考值（Ryzen 5 7500F，6 核 / 12 线程；LM Q4_K_M + mmproj q8_0）：
+
+| 环节 | 10.4 s 音频耗时 |
+|---|---|
+| 降噪（48 kHz ONNX，`denoise=true` 时） | ≈ 0.5 s |
+| 音频编码 mmproj（mtmd） | ≈ 0.5 s |
+| LM prefill + 贪心解码（本句 39 token） | ≈ 1.2–1.5 s |
+| **合计** | **2.2–2.5 s（RTF ≈ 0.22，约 4–5 倍实时）** |
+
+- **线程数默认取物理核心数**（`num_cpus`，上限 16）。用逻辑线程（超线程）会让
+  llama.cpp 明显过载：同一段音频 6 线程 2.4 s，10 线程 4.8 s，12 线程 19–40 s。
+  可用 `SHUO_ASR_THREADS` / `SHUO_MTMD_THREADS` 覆盖（mtmd 音频编码默认跟随）。
+- 每次识别会在 `~/.shuo/shuo.log` 写一行：
+  `识别完成：音频 x s，降噪 y s，ASR z s，总 t s（RTF …）`。
+- 想要本机再快一点可以开 AVX-512 编译（只对本机 CPU 有效，分发包保持 AVX2 可移植）：
+  `GGML_AVX512=ON GGML_AVX512_VNNI=ON GGML_AVX512_BF16=ON GGML_AVX512_VBMI=ON cargo build --release`
+  （Zen 4 实测无明显收益；换 CPU 后可以自己 A/B 一下）。
+- 基准命令：`cargo test --release gguf_transcribe_bench -- --ignored --nocapture`
+  （`SHUO_GGUF_LM` / `SHUO_GGUF_MM` / `SHUO_GGUF_WAV` 指真实模型与 wav）、
+  `denoise_bench` 同理。
 
 ## 项目文件 / Project Structure
 
 ```
 ├── src-tauri/                       # Tauri 3 应用（Rust 推理 + 静态前端）
-│   ├── src/                         #   ASR（GGUF 主 / ONNX 后备）/ 模型下载 / 降噪 / 音频 / 热键 / 上屏
+│   ├── src/                         #   ASR（llama.cpp/GGUF）/ 模型下载 / 降噪（ort）/ 音频 / 热键 / 上屏
 │   ├── ui/                          #   index.html / style.css / app.js / locales（27 语言）
 │   ├── resources/denoise.onnx       #   降噪模型（打包进 deb/NSIS）
 │   ├── linux/                       #   udev 规则（evdev 热键后备）
 │   ├── build.ps1                    #   Windows NSIS 打包
 │   └── tauri.conf.json              #   deb / AppImage / NSIS 配置
-├── docs/                            # 文档（ONNX 模型卡、scaffold 对照等）
+├── docs/                            # 文档（模型卡、scaffold 对照等）
 ├── linux/                           # 状态胶囊辅助脚本（shuo-overlay.py）
 ├── scripts/                         # 发布脚本（release.sh / set-version.sh）
 └── .github/workflows/               # CI（rust 双平台 + UI 断言）与 Release 构建
@@ -91,7 +119,7 @@ powershell -ExecutionPolicy Bypass -File src-tauri\build.ps1
 
 | 文件 File | 说明 Description |
 |---|---|
-| `config.json` | 语言、快捷键、模型目录、后端选择、风格提示词（`style_preset`/`style_prompt`）Language, hotkey, model dirs, backend, style prompt |
+| `config.json` | 语言、快捷键、模型目录、风格提示词（`style_preset`/`style_prompt`）Language, hotkey, model dirs, style prompt |
 | `history.json` | 识别历史（最多 500 条）History (max 500) |
 | `shuo.log` | 运行日志（UTF-8）Runtime log (UTF-8) |
 | `models/` | 一键下载的模型落盘处 Downloaded models live here |
@@ -106,11 +134,10 @@ powershell -ExecutionPolicy Bypass -File src-tauri\build.ps1
 | 库 Library | 用途 Purpose |
 |---|---|
 | tauri 3 | 应用框架 App framework |
-| llama-cpp-sys-2 | llama.cpp 绑定（GGUF 推理，主后端）llama.cpp bindings (GGUF, primary) |
-| ort | ONNX Runtime 绑定（0.6B 后备后端 + 降噪）ONNX Runtime (fallback ASR + denoise) |
+| llama-cpp-sys-2 | llama.cpp 绑定（GGUF 推理，唯一 ASR 后端）llama.cpp bindings (the only ASR backend) |
+| ort | ONNX Runtime 绑定（仅降噪 denoise）ONNX Runtime (denoise only) |
 | cpal | 音频录制 Audio capture |
-| tokenizers | 文本分词（ONNX 后端）Tokenization (ONNX path) |
-| ureq | 模型下载（GitHub Release；TLS 走系统证书库）Model download (system trust store) |
+| ureq | 模型下载（ModelScope 仓库；TLS 走系统证书库）Model download (system trust store) |
 
 ## 许可证 / License
 

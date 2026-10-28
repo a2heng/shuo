@@ -93,14 +93,25 @@ pub struct GgufAsr {
   max_new_tokens: i32,
 }
 
-// 引擎在单一 worker 线程内串行使用（与 AsrPipeline 的 Mutex 语义一致）
+// 引擎在单一 worker 线程内串行使用（AppState 的 Mutex 槽位保护）
 unsafe impl Send for GgufAsr {}
 
 impl GgufAsr {
   /// 加载 LM GGUF 与 mmproj，建立推理上下文（CPU 静态构建：ngl=0）。
   pub fn load(lm: &Path, mmproj: &Path, threads: usize, max_new_tokens: usize) -> Result<Self, String> {
     init_backend();
-    let threads = threads.clamp(1, 16) as i32;
+    // 线程数：默认 = available_parallelism（本机 6 核 / 12 线程）。
+    // 可用环境变量微调（实测音频编码对线程数敏感）：SHUO_ASR_THREADS / SHUO_MTMD_THREADS。
+    let threads = std::env::var("SHUO_ASR_THREADS")
+      .ok()
+      .and_then(|v| v.trim().parse::<usize>().ok())
+      .unwrap_or(threads)
+      .clamp(1, 16) as i32;
+    let mtmd_threads = std::env::var("SHUO_MTMD_THREADS")
+      .ok()
+      .and_then(|v| v.trim().parse::<i32>().ok())
+      .unwrap_or(threads)
+      .clamp(1, 16);
     unsafe {
       let c_lm = to_cstring(lm)?;
       let mut mparams = sys::llama_model_default_params();
@@ -125,7 +136,12 @@ impl GgufAsr {
       }
 
       let c_mm = to_cstring(mmproj)?;
-      let mparams2 = sys::mtmd_context_params_default();
+      let mut mparams2 = sys::mtmd_context_params_default();
+      // 默认 n_threads=4：音频编码 / 梅尔谱（mtmd-audio）只有 4 线程，是长音频的瓶颈。
+      // CPU 静态构建没有 GPU 后端，use_gpu 必须关；print_timings 关掉避免日志噪声。
+      mparams2.use_gpu = false;
+      mparams2.n_threads = mtmd_threads;
+      mparams2.print_timings = std::env::var_os("SHUO_LLAMA_LOG").is_some_and(|v| v != "0");
       let mtmd = sys::mtmd_init_from_file(c_mm.as_ptr(), model, mparams2);
       if mtmd.is_null() {
         sys::llama_free(ctx);
@@ -300,7 +316,7 @@ impl GgufAsr {
     }
   }
 
-  /// 转写一段 16 kHz 单声道音频；长音频按静音切分（与 AsrPipeline::transcribe 同接口）。
+  /// 转写一段 16 kHz 单声道音频；长音频按静音切分。
   pub fn transcribe(
     &mut self,
     wav: &[f32],
@@ -351,7 +367,7 @@ impl GgufAsr {
     })
   }
 
-  /// 无分段（降噪路径使用，与 AsrPipeline::transcribe_single 同接口）。
+  /// 无分段（降噪路径使用）。
   pub fn transcribe_single(
     &mut self,
     wav: &[f32],
@@ -419,6 +435,50 @@ mod tests {
     assert_eq!(parse_asr_output("language None<asr_text>今天"), ("今天".to_string(), "None".to_string()));
   }
 
+  /// 性能基准（手动跑，不进 CI）：
+  /// `SHUO_GGUF_LM=… SHUO_GGUF_MM=… SHUO_GGUF_WAV=… [SHUO_BENCH_THREADS=6] \
+  ///  cargo test --release gguf_transcribe_bench -- --ignored --nocapture`
+  #[test]
+  #[ignore = "bench: 需要真实模型与 wav"]
+  fn gguf_transcribe_bench() {
+    let (Ok(lm), Ok(mm), Ok(wav_path)) = (
+      std::env::var("SHUO_GGUF_LM"),
+      std::env::var("SHUO_GGUF_MM"),
+      std::env::var("SHUO_GGUF_WAV"),
+    ) else {
+      eprintln!("跳过：SHUO_GGUF_LM / SHUO_GGUF_MM / SHUO_GGUF_WAV 未设置");
+      return;
+    };
+    let threads: usize = std::env::var("SHUO_BENCH_THREADS")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or_else(crate::threads);
+    let mut reader = crate::asr::hound_lite::Wav::open(std::path::Path::new(&wav_path)).expect("wav");
+    let rate = reader.rate();
+    let wav16 = reader.read_i16_mono();
+    let mut wav: Vec<f32> = wav16.iter().map(|&s| s as f32 / 32768.0).collect();
+    if rate != SAMPLE_RATE as u32 {
+      wav = crate::dsp::resample(&wav, rate, SAMPLE_RATE as u32).expect("resample");
+    }
+    let audio_s = wav.len() as f64 / SAMPLE_RATE as f64;
+    let t = Instant::now();
+    let mut engine =
+      GgufAsr::load(std::path::Path::new(&lm), std::path::Path::new(&mm), threads, 512).expect("load");
+    eprintln!("LOAD threads={threads} {:.2}s", t.elapsed().as_secs_f64());
+    for i in 0..3 {
+      let t = Instant::now();
+      let r = engine.transcribe_single(&wav, None, "", 512).expect("wav");
+      let wall = t.elapsed().as_secs_f64();
+      eprintln!(
+        "RUN{i} audio={audio_s:.2}s asr={:.2}s wall={wall:.2}s RTF={:.3} tokens={} text={}",
+        r.asr_s,
+        wall / audio_s,
+        r.tokens,
+        &r.text.chars().take(40).collect::<String>()
+      );
+    }
+  }
+
   /// 真实模型冒烟（仅 SHUO_GGUF_LM / SHUO_GGUF_MMPROJ 存在时跑，
   /// CI 的 gguf-e2e 模式使用）：加载 → 转录参考 wav → 断言非空 + context 冒烟。
   #[test]
@@ -427,9 +487,10 @@ mod tests {
       eprintln!("跳过：SHUO_GGUF_LM / SHUO_GGUF_MM 未设置");
       return;
     };
-    let wav_path = std::env::var("SHUO_GGUF_WAV").unwrap_or_else(|_| {
-      "models/Qwen3-ASR-0.6B-ONNX-CPU/test_audio/librispeech_1_1089_1.wav".to_string()
-    });
+    let Ok(wav_path) = std::env::var("SHUO_GGUF_WAV") else {
+      eprintln!("跳过：SHUO_GGUF_WAV 未设置");
+      return;
+    };
     let mut reader = crate::asr::hound_lite::Wav::open(std::path::Path::new(&wav_path)).expect("wav");
     let rate = reader.rate();
     let wav16 = reader.read_i16_mono();

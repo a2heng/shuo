@@ -111,11 +111,17 @@ pub fn register_portal_app() {
 }
 
 /// 推理线程数：按核数（上限 16），避免在低核机器上过订阅。
+/// 推理线程数 = **物理核心数**（上限 16）。
+///
+/// 不要用 `available_parallelism()`（逻辑线程数）：llama.cpp/ggml 在超线程上会
+/// 明显过载。本机（Ryzen 5 7500F，6C/12T）实测 10.8 s 音频：6 线程 2.4 s，
+/// 8 线程 2.6 s，10 线程 4.8 s，12 线程 19–40 s。gguf_asr 的音频编码（mtmd）
+/// 也用同一个数（另可用 SHUO_ASR_THREADS / SHUO_MTMD_THREADS 覆盖）。
 pub fn threads() -> usize {
-  std::thread::available_parallelism()
+  let logical = std::thread::available_parallelism()
     .map(|n| n.get())
-    .unwrap_or(4)
-    .clamp(1, 16)
+    .unwrap_or(4);
+  num_cpus::get_physical().min(logical).clamp(1, 16)
 }
 
 /// 屏幕底部的胶囊浮层：Linux 走 XWayland helper（不抢焦点），其它平台走独立窗口。
@@ -255,7 +261,7 @@ fn save_config(
   if hotkey_changed {
     state.inner().start_hotkey();
   }
-  if current.asr_model_dir != next.asr_model_dir || current.asr_backend != next.asr_backend {
+  if current.asr_model_dir != next.asr_model_dir {
     state.inner().reload_models();
   }
   Ok(next)
@@ -347,7 +353,7 @@ fn reload_engine(state: tauri::State<'_, Arc<AppState>>) {
   state.inner().reload_engine_full();
 }
 
-/// 一键下载微调模型包（GitHub Release → ~/.shuo/models/，后台线程 + 进度事件）
+/// 一键下载微调模型包（ModelScope 模型仓库 → ~/.shuo/models/，后台线程 + 进度事件）
 #[tauri::command]
 fn download_model(
   app: tauri::AppHandle,
@@ -376,7 +382,7 @@ struct DownloadInfo {
 fn model_download_info() -> DownloadInfo {
   DownloadInfo {
     dir: model_download::target_dir().display().to_string(),
-    url: model_download::release_url(),
+    url: model_download::repo_url(),
     downloading: model_download::is_downloading(),
     files: model_download::local_state()
       .into_iter()
@@ -385,10 +391,10 @@ fn model_download_info() -> DownloadInfo {
   }
 }
 
-/// 在系统浏览器打开下载源 Release 页
+/// 在系统浏览器打开模型仓库页（ModelScope）
 #[tauri::command]
-fn open_release_page() {
-  open_path(std::path::Path::new(&model_download::release_url()));
+fn open_model_page() {
+  open_path(std::path::Path::new(&model_download::repo_url()));
 }
 
 #[tauri::command]
@@ -484,7 +490,7 @@ fn main() {
       reload_engine,
       download_model,
       model_download_info,
-      open_release_page,
+      open_model_page,
       open_user_dir,
       open_log,
       quit_app,

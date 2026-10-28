@@ -56,7 +56,7 @@
     ],
     "category": "Utility",
     "shortDescription": "本地语音识别",
-    "longDescription": "说 · Shuo — 基于 Qwen3-ASR-0.6B ONNX CPU 推理 + Qwen3.5-2B ONNX 文本优化的本地语音识别工具。无需 GPU，无需云端。",
+    "longDescription": "说 · Shuo — 基于微调 Qwen3-ASR-1.7B（llama.cpp/GGUF，CPU）的本地语音识别工具：提示词控制输出风格（书面化 / 翻译 / 简略 / 详细），一次推理直出目标文本。无需 GPU，无需云端。",
     "resources": {
       "resources/denoise.onnx": "denoise.onnx",
       "../linux/shuo-overlay.py": "shuo-overlay.py"

@@ -157,3 +157,46 @@ impl Denoiser {
     Ok(out)
   }
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::time::Instant;
+
+  /// 降噪耗时基准（手动跑）：
+  /// `SHUO_GGUF_WAV=… cargo test --release denoise_bench -- --ignored --nocapture`
+  #[test]
+  #[ignore = "bench: 需要 resources/denoise.onnx 与 wav"]
+  fn denoise_bench() {
+    let model = std::env::var("SHUO_DENOISE_ONNX").unwrap_or_else(|_| {
+      format!("{}/resources/denoise.onnx", env!("CARGO_MANIFEST_DIR"))
+    });
+    let Ok(wav_path) = std::env::var("SHUO_GGUF_WAV") else {
+      eprintln!("跳过：SHUO_GGUF_WAV 未设置");
+      return;
+    };
+    let mut reader =
+      crate::asr::hound_lite::Wav::open(Path::new(&wav_path)).expect("wav");
+    let rate = reader.rate();
+    let wav16 = reader.read_i16_mono();
+    let mut wav: Vec<f32> = wav16.iter().map(|&s| s as f32 / 32768.0).collect();
+    if rate != SR as u32 {
+      wav = crate::dsp::resample(&wav, rate, SR as u32).expect("resample");
+    }
+    let audio_s = wav.len() as f64 / SR as f64;
+    let t = Instant::now();
+    let mut d = Denoiser::load(Path::new(&model)).expect("load");
+    eprintln!("LOAD {:.2}s", t.elapsed().as_secs_f64());
+    for i in 0..3 {
+      let t = Instant::now();
+      let out = d.denoise(&wav).expect("denoise");
+      let wall = t.elapsed().as_secs_f64();
+      eprintln!(
+        "RUN{i} audio={audio_s:.2}s denoise={wall:.2}s RTF={:.3} samples={}",
+        wall / audio_s,
+        out.len()
+      );
+      d.reset();
+    }
+  }
+}
