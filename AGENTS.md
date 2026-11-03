@@ -27,9 +27,9 @@ Single implementation: Tauri 3 (`src-tauri/`), all-Rust inference (`llama-cpp-sy
 | `src/asr.rs` | ASR 公共契约（**无推理代码**）：`AsrResult`、`style_preset_list()`/`style_preset_prompt()` 预设（与模型包 `shuo-model.json` 的 `prompts` 记录逐字对表）、测试用 `hound_lite` WAV 读取；底部 `prompt_contract` 用 cfg(test) 保留 Qwen3 chat 模板的 token 级布局作回归对照 |
 | `src/gguf_asr.rs` | ASR pipeline (GGUF/llama.cpp，主路径): llama-cpp-sys-2 静态链接（openmp+mtmd），LM+mmproj 加载、mtmd 音频 tokenize/prefill、贪心解码、`language X<asr_text>` 解析；对外 `transcribe`/`transcribe_single` → `AsrResult`（唯一 ASR 后端） |
 | `src/model_download.rs` | 模型一键下载：ModelScope `repo/files` 查清单（Size + Sha256）→ 流式落盘（.part + Range 断点续传 + 大小/SHA256 校验）→ `model-download` 进度事件 → 完成后 `reload_engine_full`。**下载源 = 顶部 `REPO`/`REVISION` 常量**（`a2heng/shuo-asr-1.7b-gguf` @ `master`，公开仓库免登录；`SHUO_MODEL_ENDPOINT` 可覆盖域名指向镜像）；TLS 走系统证书库（ureq `platform-verifier`，共享 Agent） |
-| `src/mel.rs` | Mel filters/log-mel/VAD splitting/AGC — numerically equal to librosa (max diff 2e-5) |
+| `src/mel.rs` | Mel filters/log-mel/VAD splitting + **压缩器**（`compress`：逐帧低抬高降 → 整段对齐 -1.9 dBFS → tanh 软限幅 0.98；替代原来的整段 AGC）—— mel 数值与 librosa 一致（max diff 2e-5） |
 | `src/denoise.rs` | Streaming ONNX denoiser (NFT_960, 48 kHz) |
-| `src/audio.rs` | cpal always-on capture + 0.5 s pre-buffer + 500 ms release debounce |
+| `src/audio.rs` | cpal always-on capture + **strict hotkey boundaries**（按下开始、松手截止，无预缓冲、无收尾等待）+ `mel::compress` 电平处理 |
 | `src/hotkey.rs` | Spec parsing (keyboard + mouse side buttons), platform dispatch |
 | `src/hotkey_windows.rs` | Low-level keyboard/mouse hooks (press **and** release, injected-event filter) |
 | `src/hotkey_linux.rs` | GlobalShortcuts portal (Wayland, primary) + evdev fallback (X11 / mouse buttons) |
@@ -61,7 +61,7 @@ Single implementation: Tauri 3 (`src-tauri/`), all-Rust inference (`llama-cpp-sy
 - **Config at `~/.shuo/config.json`**: hotkey/hotkey_terminal (+ _enabled), language, ASR lang, denoise, auto_type, mic_device, style_{preset,prompt}
 - **Log at `~/.shuo/shuo.log`**: UTF-8, `log_line()` (Rust)
 - **History at `~/.shuo/history.json`**: max 500 entries, newest first
-- **Recording:** Pre-buffer 0.5s rolling buffer, AGC peak-normalizes to -1 dBFS; release debounce 500ms
+- **Recording:** 严格按热键切段——按下那一刻开始、松开那一刻结束（**无 0.5 s 预缓冲、无 500 ms 收尾等待**），松手后立刻进识别队列；电平只由**一个压缩器**处理（`mel::compress`：20 ms 帧 RMS 拉向 -20 dBFS、快抬 5 ms/慢降 120 ms、停顿不动 → 整段 99 分位峰值对齐 0.8 = -1.9 dBFS → tanh 软限幅 0.98）。旧做法是先整段 AGC 再降噪，段内强弱差压不住；现在 AGC 已删除
 - **Auto-type:** Windows SendInput + KEYEVENTF_UNICODE; Linux clipboard (**xclip/xsel via XWayland — never `wl-copy` unless pure Wayland**) + paste shortcut via uinput (primary) or RemoteDesktop portal (fallback, authorized in the background); runs on its own `shuo-output` thread with 1.5 s timeouts on every external command
 - **Global hotkey:** Windows = low-level hooks (RegisterHotKey can't detect release); Linux = `GlobalShortcuts` portal (needs host app-id registration + `com.shuo.desktop.desktop`), evdev as fallback
 - **Inference threading:** 单一推理 worker 线程串行处理识别任务（context 恒注入，无第二段模型）；**上屏另有独立 `shuo-output` 线程串行粘贴**（识别/录音永远不被上屏阻塞）；识别队列上限 8 段、上屏队列 16 条；底部胶囊状态由 `Busy`（录音 > 识别中 > 空闲）推导，仅变化时下发；下载在独立线程，完成后原子替换引擎槽位

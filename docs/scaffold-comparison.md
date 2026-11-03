@@ -79,7 +79,7 @@
 | RSS（模型已加载） | **3.27 GB** | **3.59 GB** |
 | 推理传输 | 无（同进程） | 每 10 s 音频 ≈ 0.9 MB Base64（48 kHz f32） |
 | 音频设备名 | cpal 直接给 ALSA/PipeWire 名字 | Chromium 标签（与系统名不完全一致） |
-| 音频采集实现 | cpal 常开 + 0.5 s 预缓冲 + 500 ms 收尾 | `getUserMedia` + AudioWorklet（本实现；MediaRecorder 的 webm 解码时长不可靠） |
+| 音频采集实现 | cpal 常开 + 严格热键边界（无预缓冲/收尾等待） | `getUserMedia` + AudioWorklet（本实现；MediaRecorder 的 webm 解码时长不可靠） |
 | 自动输入 | 引擎内 `type_text`（SendInput / 门户） | 需借引擎或 native 模块 |
 | 托盘 | 可用 | 更成熟 |
 | 升级/分发 | 依赖 WebKitGTK（deb 声明依赖） | 自带 Chromium，发行版无依赖差异 |

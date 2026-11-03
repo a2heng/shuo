@@ -1,11 +1,12 @@
 // 说 · Shuo — 麦克风采集（cpal）
 //
-// 常开采集 + 0.5 s 预缓冲：按下热键/按钮时把预缓冲并入本段，松开后 500 ms 收尾
-// （这段时间内再按下则继续同一段，不丢前一截）。整段在收尾时做 AGC，然后交给识别线程。
+// 常开采集 + 严格的热键边界：**按下的那一刻开始、松开的那一刻结束**。
+// 不把「按下前」的音频并进来，也不等「松手后」的尾音 —— 连续说话时那段前后
+// 缓冲会把上一句的尾巴、下一句的开头一起塞进同一段，识别结果就串味了。
+// 整段在收尾时过一遍压缩器（`mel::compress`），然后交给识别线程。
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,9 +17,9 @@ use crate::mel;
 use crate::state::{Job, Sink};
 use crate::typing::PasteMode;
 
-const PRE_BUF_SEC: f32 = 0.5;
-const DEBOUNCE: Duration = Duration::from_millis(500);
 const MIN_SAMPLES_SEC: f32 = 0.1;
+/// 单段录音上限（防止热键卡死时无限增长内存）。
+const MAX_SEGMENT_SEC: usize = 120;
 
 pub struct RecorderStatus {
   pub ok: bool,
@@ -28,12 +29,10 @@ pub struct RecorderStatus {
 }
 
 struct Shared {
-  pre: VecDeque<f32>,
-  pre_cap: usize,
   active: bool,
   paste_mode: PasteMode,
   buf: Vec<f32>,
-  finalize_at: Option<Instant>,
+  cap: usize,
 }
 
 #[derive(Debug)]
@@ -124,12 +123,10 @@ fn run(
   let rate = supported.sample_rate();
   let channels = supported.channels() as usize;
   let shared = Arc::new(Mutex::new(Shared {
-    pre: VecDeque::with_capacity((rate as f32 * PRE_BUF_SEC) as usize + 4096),
-    pre_cap: (rate as f32 * PRE_BUF_SEC) as usize,
     active: false,
     paste_mode: PasteMode::CtrlV,
     buf: Vec::with_capacity(rate as usize * 60),
-    finalize_at: None,
+    cap: rate as usize * MAX_SEGMENT_SEC,
   }));
 
   let stream = match build_stream(&dev, &supported, shared.clone(), channels) {
@@ -149,16 +146,15 @@ fn run(
   let mut last_emit = Instant::now();
   loop {
     let cmd = rx.recv_timeout(Duration::from_millis(20));
+    // 本次循环要么是「松手收尾」，要么什么都不做
+    let mut ready_samples: Option<(Vec<f32>, PasteMode)> = None;
     match cmd {
       Ok(Cmd::Press(mode)) => {
         let mut s = shared.lock().unwrap();
         s.paste_mode = mode;
-        s.finalize_at = None;
         if !s.active {
           s.active = true;
           s.buf.clear();
-          let pre: Vec<f32> = s.pre.drain(..).collect();
-          s.buf.extend_from_slice(&pre);
           drop(s);
           sink.emit_record(true, 0.0);
         }
@@ -167,7 +163,10 @@ fn run(
         let mut s = shared.lock().unwrap();
         if s.active {
           s.active = false;
-          s.finalize_at = Some(Instant::now() + DEBOUNCE);
+          // 严格在这里截止：松开之后采集到的样本不再属于本段
+          let samples = std::mem::take(&mut s.buf);
+          s.buf = Vec::with_capacity(rate as usize * 60);
+          ready_samples = Some((samples, s.paste_mode));
         }
       }
       Ok(Cmd::Quit) => break,
@@ -175,31 +174,17 @@ fn run(
       Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
     }
 
-    // 收尾判定
-    let ready_samples = {
-      let mut s = shared.lock().unwrap();
-      let due = s
-        .finalize_at
-        .map(|t| Instant::now() >= t)
-        .unwrap_or(false)
-        && !s.active;
-      if due {
-        s.finalize_at = None;
-        // 松开后的尾音仍在预缓冲里，接在本段后面
-        let tail: Vec<f32> = s.pre.drain(..).collect();
-        s.buf.extend_from_slice(&tail);
-        let samples = std::mem::take(&mut s.buf);
-        s.buf = Vec::with_capacity(rate as usize * 60);
-        Some((samples, s.paste_mode))
-      } else {
-        None
-      }
-    };
-
     if let Some((mut samples, paste_mode)) = ready_samples {
       let dur = samples.len() as f64 / rate as f64;
       if dur >= MIN_SAMPLES_SEC as f64 {
-        mel::agc(&mut samples);
+        let raw_level = mel::levels(&samples);
+        // 唯一一环：压缩器（低抬高降 + 整段对齐 0.8 峰值 + 软限幅）
+        mel::compress(&mut samples, rate);
+        // 找回声：原始电平 → 处理后（日志里能看出麦克风是不是太安静、压缩器抬了多少）
+        crate::log_line(&format!(
+          "录音 {dur:.2}s 电平：原始 {raw_level} → 处理后 {}",
+          mel::levels(&samples)
+        ));
         sink.finish_record(
           dur,
           Some(Job { samples, rate, duration_s: dur, paste_mode }),
@@ -285,15 +270,9 @@ fn dev_name(device: &cpal::Device) -> String {
 fn push_shared(shared: &Arc<Mutex<Shared>>, data: &[f32], channels: usize) {
   let mono = mel::to_mono(data, channels);
   if let Ok(mut s) = shared.try_lock() {
-    if s.active {
-      if s.buf.len() + mono.len() <= s.pre_cap.max(1) * 120 {
-        s.buf.extend_from_slice(&mono);
-      }
-    } else {
-      s.pre.extend(mono);
-      while s.pre.len() > s.pre_cap {
-        s.pre.pop_front();
-      }
+    // 只在「按下 → 松开」之间收集；没录音时来的样本直接丢弃（不再留预缓冲）
+    if s.active && s.buf.len() + mono.len() <= s.cap {
+      s.buf.extend_from_slice(&mono);
     }
   }
 }

@@ -591,8 +591,16 @@ fn transcribe(
   let mut guard = state.denoiser.lock().unwrap();
   let denoiser = if cfg.denoise { guard.as_mut() } else { None };
   let t_norm = std::time::Instant::now();
+  let level_in = crate::mel::levels(&job.samples);
   let samples = normalize_audio(job.samples, job.rate, denoiser)?;
   let denoise_s = t_norm.elapsed().as_secs_f64();
+  // 电平对照：压缩器（采集端）→ 降噪 → 16 kHz 之后，ASR 实际看到的电平
+  crate::log_line(&format!(
+    "电平：输入 {} → 送 ASR {}{}",
+    level_in,
+    crate::mel::levels(&samples),
+    if cfg.denoise { "（已降噪）" } else { "" }
+  ));
 
   let lang_owned = cfg.asr_lang.clone();
   let language = if lang_owned == "auto" || lang_owned.is_empty() {
