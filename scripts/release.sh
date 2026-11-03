@@ -36,7 +36,8 @@ fi
 # 远端 tag 可能是别的机器推的，先同步再算版本
 git fetch --tags --quiet origin
 
-base=$(date +%y.%m.%d)
+# 版本号必须能被 semver 解析：个位月/日不能带前导零（26.11.03 → 26.11.3）
+base=$(date +%y.%-m.%-d)
 version=$base
 i=1
 while git rev-parse -q --verify "refs/tags/v$version" >/dev/null; do

@@ -65,6 +65,7 @@ const EXTRA = {
     "status.off": "off",
     "status.error": "error",
     "meta.processing": "Transcribing…",
+    "meta.queue": "queue {n}",
     "meta.done": "Done",
     "confirm.clear": "Clear all history? This cannot be undone.",
     "banner.hotkey": "Global hotkey unavailable",
@@ -119,6 +120,7 @@ const EXTRA = {
     "status.off": "未启用",
     "status.error": "出错",
     "meta.processing": "识别中…",
+    "meta.queue": "队列 {n}",
     "meta.done": "完成",
     "confirm.clear": "确定清空所有历史记录？此操作不可撤销。",
     "banner.hotkey": "全局热键不可用",
@@ -168,6 +170,12 @@ const state = {
   capturing: false,
   current: { asr: "", final: "" },
   lastRecordS: 0,
+  // 按住状态（同步标志：不等事件回来，避免快速连按吞掉松开）
+  pressing: false,
+  // 识别队列里还有几段没出结果（Rust `queue` 事件；与录音状态互相独立）
+  pending: 0,
+  metaText: "",
+  jobId: 0,
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -353,7 +361,11 @@ function renderResult() {
 }
 
 function renderMeta(text) {
-  $("#meta").textContent = text || "";
+  state.metaText = text || "";
+  // 队列里还有几段没出结果时，在 meta 后面带上队列长度（录音中也会提示，避免以为卡住）
+  const n = state.pending;
+  const suffix = n > 0 ? ` · ${t("meta.queue", { n })}` : "";
+  $("#meta").textContent = state.metaText + suffix;
 }
 
 function renderHistory() {
@@ -439,21 +451,29 @@ function onRecEvent(payload) {
       $("#timer").textContent = "0.0s";
     }
     $("#record-hint").textContent = t("record.hold");
-    renderMeta("");
+    // 录音与识别是两条独立流水线：松开后如果是「过短忽略」就保持原样，
+    // 否则先显示「识别中」，具体进度由 processing / queue / asr / final 事件更新。
+    if (state.pending > 0) renderMeta(t("meta.processing"));
   }
 }
 
 async function pressRecord() {
-  if (state.recording) return;
+  // 用同步的「按下已发送」标志，而不是等 `rec` 事件回来再判断：
+  // 快速连按（按下→松开几毫秒内）时，recording 事件还没到，旧的写法会把松开吞掉，
+  // 采集线程就一直停在录音态，下一段全被并进同一条录音。
+  if (state.pressing) return;
+  state.pressing = true;
   try {
     await invoke("start_record");
   } catch (e) {
+    state.pressing = false;
     toast(String(e), "err");
   }
 }
 
 async function releaseRecord() {
-  if (!state.recording) return;
+  if (!state.pressing) return;
+  state.pressing = false;
   try {
     await invoke("stop_record");
   } catch (e) {
@@ -923,10 +943,18 @@ async function bindEvents() {
     txt.textContent = `${p.asset} ${mb(p.asset_received)}/${mb(p.asset_total)} MiB · ${Math.round(done * 100)}%`;
   });
   await listen("rec", (e) => onRecEvent(e.payload));
+  // 识别队列长度（Rust 端 Busy 状态机推送）：与录音完全独立，只在 meta 上提示
+  await listen("queue", (e) => {
+    state.pending = Number((e.payload && e.payload.pending) || 0);
+    renderMeta(state.metaText);
+  });
   await listen("recorder", (e) => {
     if (!e.payload.ok) toast(e.payload.error || "recorder error", "err");
   });
-  await listen("processing", () => {
+  await listen("processing", (e) => {
+    const p = e.payload || {};
+    if (p.id) state.jobId = p.id;
+    if (typeof p.pending === "number") state.pending = p.pending;
     state.current = { asr: "", final: "", language: "" };
     renderResult();
     $("#meta-final").textContent = "";
@@ -948,6 +976,7 @@ async function bindEvents() {
   });
   await listen("final", (e) => {
     const p = e.payload;
+    if (typeof p.pending === "number") state.pending = p.pending;
     state.current.asr = p.asr_text || state.current.asr;
     state.current.final = p.text || p.asr_text || "";
     renderResult();

@@ -198,11 +198,14 @@ fn run(
 
     if let Some((mut samples, paste_mode)) = ready_samples {
       let dur = samples.len() as f64 / rate as f64;
-      sink.emit_record(false, dur);
       if dur >= MIN_SAMPLES_SEC as f64 {
         mel::agc(&mut samples);
-        sink.submit(Job { samples, rate, duration_s: dur, paste_mode });
+        sink.finish_record(
+          dur,
+          Some(Job { samples, rate, duration_s: dur, paste_mode }),
+        );
       } else {
+        sink.finish_record(dur, None);
         crate::log_line(&format!("录音过短（{dur:.2}s），忽略"));
       }
     }

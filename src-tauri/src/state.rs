@@ -1,11 +1,21 @@
-// 说 · Shuo — 应用状态与识别线程
+// 说 · Shuo — 应用状态、识别线程与上屏线程
 //
-// 单一线程串行处理识别任务（ASR 输出即最终文本），与 Python 版的队列语义一致。
+// **三条互相独立的流水线**（连续说话时不互相拖累）：
+//   采集线程（audio.rs）→ 按下/松开只改状态、切音频，永不等待识别或上屏；
+//   识别线程（本文件的 spawn_worker）→ 串行 ASR，只产出文本；
+//   上屏线程（本文件的 spawn_output）→ 串行粘贴，慢/卡/弹授权框都只影响它自己。
+//
+// 为什么上屏必须单独一条线程：剪贴板工具（wl-copy / 门户授权对话框 / 目标应用）
+// 都可能长时间不返回。以前上屏直接在识别线程里做，一旦卡住整个识别队列就停住，
+// 用户看到的是「说了话却什么都不出来」。
+//
+// 忙状态（底部胶囊）由 `Busy` 统一计算：录音 > 识别队列 > 空闲，
+// 且只在真正变化时才下发，避免「识别中」把新一段的「录音中」冲掉。
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -17,11 +27,91 @@ use crate::denoise::Denoiser;
 use crate::gguf_asr::GgufAsr;
 use crate::models::{self, ModelPaths};
 
+/// 识别队列上限：超出就丢弃**新**的一段（保住先说的话，且不会无限堆积）。
+const MAX_PENDING: usize = 8;
+/// 上屏队列上限（正常情况下识别慢于上屏，几乎用不到）。
+const MAX_PASTE_PENDING: usize = 16;
+
 pub struct Job {
   pub samples: Vec<f32>,
   pub rate: u32,
   pub duration_s: f64,
   pub paste_mode: crate::typing::PasteMode,
+}
+
+/// 一段待上屏的文本（识别线程产出 → 上屏线程消费）。
+pub struct PasteJob {
+  pub id: u64,
+  pub text: String,
+  pub paste_mode: crate::typing::PasteMode,
+}
+
+/// 底部胶囊状态机（录音中 / 识别中 / 空闲）。
+///
+/// `pending` = 已提交但还没出结果的识别段数（含正在跑的那段）。
+pub struct Busy {
+  app: AppHandle,
+  recording: AtomicBool,
+  pending: AtomicUsize,
+  last: Mutex<Option<crate::BusyMode>>,
+}
+
+impl Busy {
+  fn new(app: AppHandle) -> Arc<Self> {
+    Arc::new(Self {
+      app,
+      recording: AtomicBool::new(false),
+      pending: AtomicUsize::new(0),
+      last: Mutex::new(None),
+    })
+  }
+
+  pub fn pending(&self) -> usize {
+    self.pending.load(Ordering::SeqCst)
+  }
+
+  pub fn set_recording(&self, on: bool) {
+    self.recording.store(on, Ordering::SeqCst);
+    self.sync();
+  }
+
+  pub fn job_queued(&self) {
+    self.pending.fetch_add(1, Ordering::SeqCst);
+    self.emit_queue();
+    self.sync();
+  }
+
+  pub fn job_done(&self) {
+    let _ = self.pending.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| {
+      Some(n.saturating_sub(1))
+    });
+    self.emit_queue();
+    self.sync();
+  }
+
+  fn emit_queue(&self) {
+    let _ = self
+      .app
+      .emit("queue", serde_json::json!({ "pending": self.pending() }));
+  }
+
+  fn sync(&self) {
+    let mode = if self.recording.load(Ordering::SeqCst) {
+      Some(crate::BusyMode::Recording)
+    } else if self.pending.load(Ordering::SeqCst) > 0 {
+      Some(crate::BusyMode::Processing)
+    } else {
+      None
+    };
+    {
+      let mut last = self.last.lock().unwrap();
+      if *last == mode {
+        return;
+      }
+      *last = mode;
+    }
+    crate::set_busy(&self.app, mode);
+  }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,25 +131,39 @@ pub struct Status {
 pub struct Sink {
   app: AppHandle,
   tx: Sender<Job>,
+  busy: Arc<Busy>,
 }
 
 impl Sink {
+  /// 按下热键：只进入录音态（不碰识别、不碰上屏）。
   pub fn emit_record(&self, active: bool, duration_s: f64) {
     let _ = self.app.emit("rec", RecEvent { active, duration_s });
-    if active {
-      crate::hotkey::set_recording(true);
-      crate::set_busy(&self.app, Some(crate::BusyMode::Recording));
-    } else if duration_s >= 0.1 {
-      // 松开后马上进入「识别中」，避免闪一下消失
-      crate::set_busy(&self.app, Some(crate::BusyMode::Processing));
-    } else {
-      crate::set_busy(&self.app, None);
-    }
+    crate::hotkey::set_recording(active);
+    self.busy.set_recording(active);
   }
 
-  pub fn submit(&self, job: Job) {
-    if self.tx.send(job).is_err() {
+  /// 松开热键：先把这段音频交进识别队列，再切状态（顺序反了会闪一下「空闲」）。
+  pub fn finish_record(&self, duration_s: f64, job: Option<Job>) {
+    let job = match job {
+      Some(j) if self.busy.pending() < MAX_PENDING => Some(j),
+      Some(_) => {
+        crate::log_line(&format!("识别队列已满（{MAX_PENDING} 段），丢弃这一段录音"));
+        let _ = self.app.emit("notice", "识别队列已满，已丢弃一段录音");
+        None
+      }
+      None => None,
+    };
+    if job.is_some() {
+      self.busy.job_queued();
+    }
+    let _ = self.app.emit("rec", RecEvent { active: false, duration_s });
+    crate::hotkey::set_recording(false);
+    self.busy.set_recording(false);
+    if let Some(job) = job
+      && self.tx.send(job).is_err()
+    {
       crate::log_line("识别队列已关闭");
+      self.busy.job_done();
     }
   }
 }
@@ -100,14 +204,18 @@ pub struct AppState {
   pub recorder: Mutex<Option<RecorderHandle>>,
   pub hotkey: Mutex<Option<crate::hotkey::Hotkey>>,
   pub history: Mutex<Vec<HistoryItem>>,
+  pub busy: Arc<Busy>,
   pub sink: Sink,
+  paste_tx: Sender<PasteJob>,
   next_id: AtomicU64,
+  paste_pending: AtomicUsize,
 }
 
 impl AppState {
   pub fn new(app: AppHandle, cfg: Config) -> Arc<Self> {
     let paths = models::resolve(&cfg);
     let (tx, rx) = channel::<Job>();
+    let (paste_tx, paste_rx) = channel::<PasteJob>();
     let status = Status {
       loading: true,
       asr_ready: false,
@@ -121,6 +229,7 @@ impl AppState {
       style_model: paths.gguf_tuned,
       asr_backend: String::new(),
     };
+    let busy = Busy::new(app.clone());
     let state = Arc::new(Self {
       app: app.clone(),
       cfg: Mutex::new(cfg),
@@ -131,11 +240,15 @@ impl AppState {
       recorder: Mutex::new(None),
       hotkey: Mutex::new(None),
       history: Mutex::new(crate::config::load_history()),
-      sink: Sink { app, tx },
+      busy: busy.clone(),
+      sink: Sink { app, tx, busy },
+      paste_tx,
       next_id: AtomicU64::new(1),
+      paste_pending: AtomicUsize::new(0),
     });
     spawn_loader(state.clone());
     spawn_worker(state.clone(), rx);
+    spawn_output(state.clone(), paste_rx);
     state
   }
 
@@ -158,6 +271,20 @@ impl AppState {
 
   pub fn next_job_id(&self) -> u64 {
     self.next_id.fetch_add(1, Ordering::Relaxed)
+  }
+
+  /// 把识别结果交给上屏线程（本函数只入队，立即返回，绝不阻塞识别）。
+  pub fn paste(&self, job: PasteJob) {
+    let pending = self.paste_pending.load(Ordering::SeqCst);
+    if pending >= MAX_PASTE_PENDING {
+      crate::log_line(&format!("上屏队列已满（{MAX_PASTE_PENDING} 条），丢弃 #{}", job.id));
+      return;
+    }
+    self.paste_pending.fetch_add(1, Ordering::SeqCst);
+    if self.paste_tx.send(job).is_err() {
+      self.paste_pending.fetch_sub(1, Ordering::SeqCst);
+      crate::log_line("上屏队列已关闭");
+    }
   }
 
   /// 配置变更后重新解析模型路径（引擎重载见 `reload_engine_full`）。
@@ -322,20 +449,21 @@ fn spawn_loader(state: Arc<AppState>) {
     .ok();
 }
 
-fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
+fn spawn_worker(state: Arc<AppState>, rx: Receiver<Job>) {
   std::thread::Builder::new()
     .name("shuo-infer".into())
     .spawn(move || {
       while let Ok(job) = rx.recv() {
         let id = state.next_job_id();
-        let _ = state.app.emit("processing", id);
-        crate::set_busy(&state.app, Some(crate::BusyMode::Processing));
-        let cfg = state.config();
         let paste_mode = job.paste_mode;
+        let _ = state.app.emit(
+          "processing",
+          serde_json::json!({ "id": id, "pending": state.busy.pending() }),
+        );
+        let cfg = state.config();
         let result = transcribe(&state, &cfg, job);
         match result {
           Ok(asr) => {
-            crate::set_busy(&state.app, None);
             let _ = state.app.emit(
               "asr",
               serde_json::json!({
@@ -371,21 +499,54 @@ fn spawn_worker(state: Arc<AppState>, rx: std::sync::mpsc::Receiver<Job>) {
                 "style_model": style_model,
                 "text": final_text,
                 "time": crate::config::chrono_time(),
+                // 这段已出结果，队列里还剩几段（前端显示「识别中…（队列 N）」）
+                "pending": state.busy.pending().saturating_sub(1),
               }),
             );
+            // 上屏是**另一条线程**的事：这里只是入队，识别立刻回到下一段录音，
+            // 不会被剪贴板/门户授权/目标应用拖住。
             if cfg.auto_type && !final_text.trim().is_empty() {
-              if let Err(e) = crate::typing::type_text(&state.app, &final_text, paste_mode) {
-                crate::log_line(&format!("自动输入失败：{e}"));
-                let _ = state.app.emit("notice", e);
-              }
+              state.paste(PasteJob {
+                id,
+                text: final_text,
+                paste_mode,
+              });
             }
           }
           Err(e) => {
-            crate::set_busy(&state.app, None);
             crate::log_line(&format!("识别失败：{e}"));
             let _ = state.app.emit("asr-error", serde_json::json!({ "id": id, "error": e }));
           }
         }
+        state.busy.job_done();
+      }
+    })
+    .ok();
+}
+
+/// 上屏线程：串行消费识别结果。
+///
+/// 所有外部命令/门户交互都在 `typing` 里带硬超时，最坏情况只是这一条文本没打出去
+/// （会弹提示＋留在剪贴板），后面的识别结果照样按顺序上屏。
+fn spawn_output(state: Arc<AppState>, rx: Receiver<PasteJob>) {
+  std::thread::Builder::new()
+    .name("shuo-output".into())
+    .spawn(move || {
+      while let Ok(job) = rx.recv() {
+        let t0 = std::time::Instant::now();
+        match crate::typing::type_text(&state.app, &job.text, job.paste_mode) {
+          Ok(()) => crate::log_line(&format!(
+            "已上屏 #{}（{} 字，{:.2}s）",
+            job.id,
+            job.text.chars().count(),
+            t0.elapsed().as_secs_f64()
+          )),
+          Err(e) => {
+            crate::log_line(&format!("自动输入失败（#{}）：{e}", job.id));
+            let _ = state.app.emit("notice", e);
+          }
+        }
+        state.paste_pending.fetch_sub(1, Ordering::SeqCst);
       }
     })
     .ok();

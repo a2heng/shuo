@@ -125,7 +125,7 @@ pub fn threads() -> usize {
 }
 
 /// 屏幕底部的胶囊浮层：Linux 走 XWayland helper（不抢焦点），其它平台走独立窗口。
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum BusyMode {
   Recording,
   Processing,

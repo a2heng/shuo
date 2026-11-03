@@ -12,7 +12,7 @@ Single implementation: Tauri 3 (`src-tauri/`), all-Rust inference (`llama-cpp-sy
 | Build (Linux) | `cd src-tauri && cargo tauri build --bundles deb appimage`（llama.cpp 静态链接需要 clang/libclang） |
 | Build (Windows) | `powershell -ExecutionPolicy Bypass -File src-tauri\build.ps1` |
 | Rust tests | `cd src-tauri && cargo test --release`（真实模型用例由 `SHUO_GGUF_LM`+`SHUO_GGUF_MM`+`SHUO_GGUF_WAV` 环境变量门控，缺失自动跳过；**联网用例**：`cargo test --release -- --ignored modelscope_assets` 校验 ModelScope 清单 + 下 `shuo-model.json` 比对 SHA256） |
-| 发版（日期版本） | `./scripts/release.sh`（版本 = `YY.MM.DD`，tag `vYY.MM.DD`；同日重复加 `-2`）|
+| 发版（日期版本） | `./scripts/release.sh`（版本 = `YY.M.Y`，tag `vYY.M.Y`；**个位月/日不带前导零**，否则 semver/tauri 校验会拒绝；同日重复加 `-2`）|
 | 版本注入（CI） | `bash ./scripts/set-version.sh <版本>`（只由 CI 从 tag 调用；仓库里不提交版本改动）|
 | 获取模型（应用内） | 设置 → 模型与引擎 → **下载模型**（ModelScope `a2heng/shuo-asr-1.7b-gguf` → `~/.shuo/models/Qwen3-ASR-1.7B-GGUF-tuned/`，断点续传 + SHA256，完成后自动重载引擎） |
 | 获取模型（官方基座 GGUF） | `hf download ggml-org/Qwen3-ASR-1.7B-GGUF --include "Qwen3-ASR-1.7B-Q8_0.gguf" "mmproj-Qwen3-ASR-1.7B-Q8_0.gguf" --local-dir Qwen3-ASR-1.7B-GGUF` |
@@ -34,10 +34,10 @@ Single implementation: Tauri 3 (`src-tauri/`), all-Rust inference (`llama-cpp-sy
 | `src/hotkey_windows.rs` | Low-level keyboard/mouse hooks (press **and** release, injected-event filter) |
 | `src/hotkey_linux.rs` | GlobalShortcuts portal (Wayland, primary) + evdev fallback (X11 / mouse buttons) |
 | `src/typing_windows.rs` | SendInput + `KEYEVENTF_UNICODE` |
-| `src/typing_linux.rs` | uinput virtual keyboard for paste shortcuts (no portal prompt) → RemoteDesktop (persistent restore token, re-request on revoke) → wtype/ydotool/xdotool → clipboard |
+| `src/typing_linux.rs` | Paste pipeline (runs on its own `shuo-output` thread, every external command has a hard 1.5 s timeout): clipboard via **xclip/xsel** (XWayland X selection bridged by mutter — no `wl-clipboard` popup window / focus-stealing freeze; `wl-copy` only as pure-Wayland fallback) + uinput virtual keyboard for the paste shortcut → RemoteDesktop portal (**requested in the background**, never blocks) → wtype/ydotool/xdotool → clipboard-only + notice |
 | `src/config.rs` | `~/.shuo/config.json` + history; 输出风格字段 `style_{preset,prompt}`（serde alias 兼容旧字段名）+ `Config::style_context()`；历史版本废弃字段（含已删的 `asr_backend`）经 `extra` flatten 原样保留 |
 | `src/models.rs` | Model dir resolution（只有 GGUF）：槽位 `Qwen3-ASR-1.7B-GGUF[-tuned]/`（mmproj 前缀=音频编码器，最大 .gguf=LM）；微调包以 `shuo-model.json` 标记；`resolve()`/`describe()` |
-| `src/state.rs` | AppState, loader/worker threads, events `engine-status`/`rec`/`asr`/`final`/`hotkey`/`model-download`; ASR 槽位 `Mutex<Option<GgufAsr>>`（单一 llama.cpp 后端，加载失败直接报错）；context（风格提示词）恒随识别请求进 system 段，识别结果即最终文本，`final` 事件带 `style_model` 标志；`reload_engine_full()` 重载路径 |
+| `src/state.rs` | AppState, loader/worker/output threads, events `engine-status`/`rec`/`queue`/`processing`/`asr`/`final`/`hotkey`/`model-download`; ASR 槽位 `Mutex<Option<GgufAsr>>`（单一 llama.cpp 后端，加载失败直接报错）；context（风格提示词）恒随识别请求进 system 段，识别结果即最终文本，`final` 事件带 `style_model` + `pending`（队列剩余）；`Busy` 状态机统一推导胶囊状态（录音 > 识别中 > 空闲，仅变化时下发）；**上屏在独立 `shuo-output` 线程串行执行**，识别线程只入队；`reload_engine_full()` 重载路径 |
 | `ui/` | Static frontend (index.html / style.css / app.js / locales)；设置抽屉含「输出风格」区（预设下拉/自定义提示词/模型包状态行）与「模型下载」区（一键下载 + 进度条）；状态栏 ASR chip 显示后端（恒 GGUF）；最终卡片角标显示生效的风格预设名 |
 | `linux/70-shuo-hotkey.rules` | udev rules for evdev + uinput (`/dev/uinput` uaccess), installed by deb |
 | `linux/shuo-overlay.py` | XWayland status capsule helper (bottom, always-on-top, no focus); bundled as resource |
@@ -62,9 +62,9 @@ Single implementation: Tauri 3 (`src-tauri/`), all-Rust inference (`llama-cpp-sy
 - **Log at `~/.shuo/shuo.log`**: UTF-8, `log_line()` (Rust)
 - **History at `~/.shuo/history.json`**: max 500 entries, newest first
 - **Recording:** Pre-buffer 0.5s rolling buffer, AGC peak-normalizes to -1 dBFS; release debounce 500ms
-- **Auto-type:** Windows SendInput + KEYEVENTF_UNICODE; Linux clipboard + paste shortcut via uinput (primary) or RemoteDesktop portal (fallback)
+- **Auto-type:** Windows SendInput + KEYEVENTF_UNICODE; Linux clipboard (**xclip/xsel via XWayland — never `wl-copy` unless pure Wayland**) + paste shortcut via uinput (primary) or RemoteDesktop portal (fallback, authorized in the background); runs on its own `shuo-output` thread with 1.5 s timeouts on every external command
 - **Global hotkey:** Windows = low-level hooks (RegisterHotKey can't detect release); Linux = `GlobalShortcuts` portal (needs host app-id registration + `com.shuo.desktop.desktop`), evdev as fallback
-- **Inference threading:** 单一推理 worker 线程串行处理识别任务（context 恒注入，无第二段模型）；下载在独立线程，完成后原子替换引擎槽位
+- **Inference threading:** 单一推理 worker 线程串行处理识别任务（context 恒注入，无第二段模型）；**上屏另有独立 `shuo-output` 线程串行粘贴**（识别/录音永远不被上屏阻塞）；识别队列上限 8 段、上屏队列 16 条；底部胶囊状态由 `Busy`（录音 > 识别中 > 空闲）推导，仅变化时下发；下载在独立线程，完成后原子替换引擎槽位
 - **Theme:** `prefers-color-scheme` (web UI)
 - **Audio denoiser model** at `src-tauri/resources/denoise.onnx` (bundled)
 

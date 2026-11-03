@@ -1,7 +1,9 @@
 // 说 · Shuo — 自动输入（把识别结果打到当前焦点窗口）
 //
 // Windows：SendInput + KEYEVENTF_UNICODE（不碰剪贴板，终端 / Vim 也能用，支持非 BMP 字符）。
-// Linux：优先 wtype / ydotool / xdotool；都没有时退化为剪贴板，并如实提示。
+// Linux：剪贴板（xclip/xsel，XWayland）＋ 粘贴快捷键；wl-copy / 门户 / 外部工具都带超时。
+//
+// 上屏在独立线程（state.rs 的 shuo-output）里串行执行，绝不阻塞录音与识别。
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 

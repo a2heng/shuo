@@ -29,7 +29,8 @@ powershell -ExecutionPolicy Bypass -File src-tauri\build.ps1
   文本；预设清单即 UI 下拉框内容（`src-tauri/src/asr.rs` 的 `style_preset_list()`，
   提示词与模型包 `shuo-model.json` 的 `prompts` 记录逐字对表）。
 - **热键实现（Linux）**：优先走 `xdg-desktop-portal` 的 **GlobalShortcuts**（GNOME/KDE Wayland 官方通道，首次需在系统对话框里允许一次）；portal 不可用或要绑鼠标侧键时用 **evdev**（`/dev/input/event*`，需要 input 组权限或 `70-shuo-hotkey.rules`，deb 已自带）。
-- **自动输入（Linux）**：剪贴板 + 粘贴快捷键，快捷键由触发录音的热键决定（Ctrl+V / Ctrl+Shift+V）。**首选 uinput 虚拟键盘**（不需要任何授权框，deb 的 udev 规则会放开 `/dev/uinput`）；uinput 不可用时退回 RemoteDesktop 门户（持久化 restore token，被撤回会自动重新申请）。
+- **自动输入（Linux）**：剪贴板 + 粘贴快捷键，快捷键由触发录音的热键决定（Ctrl+V / Ctrl+Shift+V）。**首选 uinput 虚拟键盘**（不需要任何授权框，deb 的 udev 规则会放开 `/dev/uinput`）；uinput 不可用时退回 RemoteDesktop 门户（持久化 restore token，被撤回会自动重新申请）。剪贴板优先用 **xclip / xsel**（XWayland 的 X 选区，mutter 双向桥接），因为它们不会像 `wl-copy` 那样为拿选区临时弹一个 `wl-clipboard` 窗口（Ubuntu 26.04 的 wl-clipboard 2.2 在 GNOME 上还会因焦点保护卡住）；纯 Wayland 无 XWayland 时才退回 `wl-copy`。
+- **录音 / 识别 / 上屏三条流水线互相独立**：采集线程只管按下与松开，识别线程串行出文本，上屏线程串行粘贴；所有外部命令（剪贴板、门户、注入工具）都有硬超时，`识别中` 时继续按热键照常录音，连续说话不会因为某次上屏卡住而整队停摆。识别队列最多积压 8 段。
 - **状态胶囊（Linux）**：屏幕底部（任务栏上方）显示「录音中 + 波形 / 识别中 + 转圈」，XWayland 小窗置顶、不抢焦点、鼠标穿透；不需要 GNOME 扩展，也不需要注销重登录。
 - **自动输入（Windows）**：`SendInput` + `KEYEVENTF_UNICODE`，不经过剪贴板，终端 / Vim 也能用。
 
